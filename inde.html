@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Stripe PaymentIntent Tester — Single File</title>
+    <script src="https://js.stripe.com/v3/"></script>
+    <style>
+      :root{--bg:#f6f7fb;--card:#fff;--accent:#2563eb;--muted:#6b7280}
+      *{box-sizing:border-box}
+      body{font-family:Inter,system-ui,Arial,Helvetica,sans-serif;background:var(--bg);margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
+      .wrap{max-width:820px;width:100%;display:grid;grid-template-columns:1fr 420px;gap:20px}
+      .panel{background:var(--card);padding:18px;border-radius:12px;box-shadow:0 6px 20px rgba(16,24,40,0.06)}
+      h1{font-size:18px;margin:0 0 8px}
+      label{display:block;font-size:13px;color:var(--muted);margin-top:12px}
+      input[type=text]{width:100%;padding:10px;border-radius:8px;border:1px solid #e6e9ef;font-size:14px}
+      .row{display:flex;gap:8px;margin-top:10px}
+      button{padding:10px 12px;border-radius:8px;border:0;background:var(--accent);color:#fff;font-weight:600;cursor:pointer}
+      button[disabled]{opacity:.55;cursor:not-allowed}
+      #card-element{padding:12px;border:1px solid #e6e9ef;border-radius:8px}
+      .muted{color:var(--muted);font-size:13px}
+      .small{font-size:13px}
+      .presets{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+      .chip{padding:6px 8px;border-radius:999px;border:1px solid #e6e9ef;background:#fff;cursor:pointer;font-size:13px}
+      pre{background:#0f1724;color:#d1fae5;padding:12px;border-radius:8px;overflow:auto;font-size:12px}
+      .log{background:#0b1220;color:#fff;padding:10px;border-radius:8px;height:160px;overflow:auto;font-family:monospace;font-size:13px}
+      .hint{background:#f8fafc;border-left:4px solid #e2e8f0;padding:10px;border-radius:6px;margin-top:12px;font-size:13px}
+      @media (max-width:900px){.wrap{grid-template-columns:1fr;}}
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="panel">
+        <h1>Stripe PaymentIntent Tester</h1>
+        <p class="muted small">
+          Only two values required: your <strong>Publishable Key</strong> and the
+          <strong>Client Secret</strong> (pi_..._secret_...). Use Stripe <em>test</em> keys only.
+        </p>
+
+        <!-- Publishable key is now a JS variable. See script comments to set it. -->
+        <label>Publishable Key (configured in script)</label>
+        <div class="row">
+          <div
+            style="flex:1;padding:10px;border-radius:8px;border:1px solid #e6e9ef;background:#fbfdff;color:#111"
+          >
+            (set PUBLISHABLE_KEY variable in the script)
+          </div>
+        </div>
+
+        <label for="clientSecret">Client Secret (pi_..._secret_...)</label>
+        <div class="row">
+          <input id="clientSecret" type="text" placeholder="pi_..._secret_..." autocomplete="off" />
+          <button id="pasteBtn">Paste</button>
+        </div>
+
+        <label>Card</label>
+        <div id="card-element" aria-live="polite"></div>
+
+        <div class="presets" id="presets">
+          <div class="chip" data-card="4242424242424242">4242 — Success</div>
+          <div class="chip" data-card="4000002500003155">3DS Required</div>
+          <div class="chip" data-card="4000000000009995">Card Declined</div>
+          <div class="chip" data-card="4000000760000002">Insufficient funds</div>
+        </div>
+
+        <div class="row" style="margin-top:12px">
+          <button id="confirmBtn" disabled>Confirm Payment</button>
+          <button id="clearBtn" type="button">Clear</button>
+        </div>
+
+        <div class="hint">
+          <strong>How to use</strong>: open the file and set the
+          <code>PUBLISHABLE_KEY</code> variable inside the script (see top of script). Paste the
+          client secret created on the server for a PaymentIntent. Choose (or type) a test card
+          number in the preset chips, then click <em>Confirm Payment</em>.
+        </div>
+      </div>
+
+      <div class="panel">
+        <h1>Status & Debug</h1>
+        <div class="muted small">
+          Live logs (useful to debug webhooks, metadata, and clientSecret validity)
+        </div>
+        <div id="log" class="log"></div>
+
+        <h2 style="margin-top:12px;font-size:14px">PaymentIntent JSON</h2>
+        <pre id="piJson">{} </pre>
+
+        <h2 style="margin-top:8px;font-size:14px">Test card notes</h2>
+        <div class="muted small">
+          Common Stripe test card numbers: <br />4242 4242 4242 4242 (success) — 4000 0025 0000 3155
+          (3DS) — 4000 0000 0000 9995 (declined)
+        </div>
+      </div>
+    </div>
+
+    <script>
+      // ---- SET YOUR PUBLISHABLE KEY HERE ----
+      // Replace the empty string with your publishable key, for example:
+      // const PUBLISHABLE_KEY = 'pk_test_51...';
+      const PUBLISHABLE_KEY = 'pk_test_51SKC5kJCYD6Hf14Pc6IEbkW0vpJSfINcdJF11DR0crADNho7da3yh41tZxLOjWA54SzWHJX6qd0AT6P0RHIXdcef00idY7Wtkk';
+      // ---------------------------------------
+
+      let stripe = null;
+      let elements = null;
+      let card = null;
+
+      const clientSecretInput = document.getElementById('clientSecret');
+      const confirmBtn = document.getElementById('confirmBtn');
+      const clearBtn = document.getElementById('clearBtn');
+      const pasteBtn = document.getElementById('pasteBtn');
+      const logEl = document.getElementById('log');
+      const piJson = document.getElementById('piJson');
+      const presets = document.getElementById('presets');
+
+      function log(...args) {
+        const time = new Date().toISOString().slice(11,23);
+        logEl.textContent = time + '  ' + args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ') + ' ' + logEl.textContent
+      }
+
+      function enableConfirmIfReady() {
+        const sec = clientSecretInput.value.trim();
+        confirmBtn.disabled = !(stripe && card && sec);
+      }
+
+      function initStripeFromVariable() {
+        if (!PUBLISHABLE_KEY) {
+          log('PUBLISHABLE_KEY is empty. Set it in the script to enable Stripe.');
+          return;
+        }
+        try {
+          stripe = Stripe(PUBLISHABLE_KEY);
+          if (elements) { elements = null; card.destroy && card.destroy(); }
+          elements = stripe.elements();
+          card = elements.create('card', {hidePostalCode: true});
+          card.mount('#card-element');
+
+          card.on('change', (e) => {
+            if (e.error) log('Card error:', e.error.message);
+            enableConfirmIfReady();
+          });
+
+          log('Initialized Stripe with PUBLISHABLE_KEY variable.');
+        } catch (err) {
+          log('Stripe init error:', err.message || err);
+        }
+        enableConfirmIfReady();
+      }
+
+      // Auto-init on load
+      window.addEventListener('DOMContentLoaded', initStripeFromVariable);
+
+      // paste button attempts to paste from clipboard into client secret
+      pasteBtn.addEventListener('click', async () => {
+        try {
+          const txt = await navigator.clipboard.readText();
+          clientSecretInput.value = txt.trim();
+          log('Pasted client secret from clipboard.');
+          enableConfirmIfReady();
+        } catch (err) {
+          log('Clipboard paste failed:', err.message || err);
+        }
+      });
+
+      presets.addEventListener('click', (e) => {
+        const chip = e.target.closest('.chip');
+        if (!chip) return;
+        const cardNumber = chip.dataset.card;
+        prompt('Copy this test card number and paste into the card field (Elements) when focused:', cardNumber);
+      });
+
+      confirmBtn.addEventListener('click', async () => {
+        const clientSecret = clientSecretInput.value.trim();
+        if (!clientSecret) { log('Client secret missing'); return; }
+        try {
+          confirmBtn.disabled = true;
+          confirmBtn.textContent = 'Processing...';
+          log('Calling stripe.confirmCardPayment with client secret');
+          const result = await stripe.confirmCardPayment(clientSecret, {
+            payment_method: { card, billing_details: { name: 'Test User' } },
+          });
+
+          if (result.error) {
+            log('Payment error:', result.error.message);
+            piJson.textContent = JSON.stringify({error: result.error.message, type: result.error.type}, null, 2);
+            alert('Error: ' + result.error.message);
+          } else {
+            const pi = result.paymentIntent;
+            log('PaymentIntent status: ' + pi.status);
+            piJson.textContent = JSON.stringify(pi, null, 2);
+            if (pi.status === 'succeeded') {
+              alert('✅ Payment succeeded — check your webhook and DB for saved payment.');
+            } else if (pi.status === 'requires_action' || pi.status === 'requires_source_action') {
+              alert('Action required (3DS). Follow the UI.');
+            } else {
+              alert('Payment status: ' + pi.status);
+            }
+          }
+        } catch (err) {
+          log('Confirm error:', err.message || err);
+        } finally {
+          confirmBtn.textContent = 'Confirm Payment';
+          enableConfirmIfReady();
+        }
+      });
+
+      clearBtn.addEventListener('click', () => {
+        clientSecretInput.value = '';
+        if (card && card.destroy) { card.destroy(); card = null; }
+        stripe = null; elements = null;
+        document.getElementById('card-element').innerHTML = '';
+        piJson.textContent = '{}';
+        log('Cleared form.');
+        enableConfirmIfReady();
+      });
+
+      clientSecretInput.addEventListener('input', enableConfirmIfReady);
+
+      // initial log
+      log('Ready — set PUBLISHABLE_KEY in the script and paste a client secret. Use test keys only.');
+    </script>
+  </body>
+</html>
