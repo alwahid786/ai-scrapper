@@ -11,6 +11,8 @@ import {
 } from '../controllers/auth.controller.js';
 import { isAuthenticated } from '../middlewares/auth.middleware.js';
 import { isAdmin } from '../middlewares/admin.middleware.js';
+import passport from 'passport';
+import { sendToken } from '../utils/sendToken.js';
 
 const router = express.Router();
 
@@ -25,5 +27,27 @@ router
 router.post('/login', login);
 router.get('/myProfile', isAuthenticated, getMyProfile);
 router.get('/logout', logout);
+
+router.get('/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
+
+router.get(
+  '/google/callback',
+  passport.authenticate('google', { session: false, failureRedirect: '/api/auth/login' }),
+  async (req, res, next) => {
+    if (!req.user) return res.status(400).json({ success: false, message: 'User not found' });
+    // try {
+    //   const tokenData = await sendToken(res, next, req.user, 200);
+    //   res.json({ success: true, ...tokenData });
+    // } catch (err) {
+    //   next(err);
+    // }
+    try {
+      const tokenData = await sendToken(res, next, req.user, 200, true);
+      res.json({ success: true, ...tokenData });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 export default router;

@@ -3,6 +3,9 @@ import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import AuthRoutes from './routes/auth.route.js';
 import errorHandler from './middlewares/errorHandler.js';
+import session from 'express-session';
+import passport from 'passport';
+import './utils/googleAuth.js';
 
 const app = express();
 app.use(
@@ -15,6 +18,17 @@ app.use(
 app.use(cookieParser());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+app.use(
+  session({
+    secret: 'mysecret',
+    resave: false,
+    saveUninitialized: true,
+  })
+);
+
+app.use(passport.initialize());
+app.use(passport.session());
 
 app.use((req, res, next) => {
   const now = new Date();

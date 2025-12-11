@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Google Login</title>
+
+    <style>
+      button {
+        padding: 10px 20px;
+        font-size: 16px;
+        cursor: pointer;
+      }
+
+      button:disabled {
+        background-color: #ccc;
+        cursor: not-allowed;
+      }
+    </style>
+  </head>
+
+  <body>
+    <h1>Login with Google</h1>
+
+    <button id="google-login">Login with Google</button>
+
+    <script>
+      const btn = document.getElementById("google-login");
+
+      btn.addEventListener("click", () => {
+        btn.disabled = true;                 // disable button
+        btn.innerText = "Loading...";        // show loading text
+
+        // Redirect to backend Google OAuth route
+        window.location.href = "http://localhost:4000/api/auth/google";
+      });
+    </script>
+  </body>
+</html>
