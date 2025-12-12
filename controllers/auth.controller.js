@@ -113,6 +113,27 @@ export const deleteSingleUser = asyncHandler(async (req, res, next) => {
   });
 });
 
+export const updateMyProfile = asyncHandler(async (req, res, next) => {
+  const userId = req.user.id; // get logged-in user's id from middleware
+
+  if (!isValidObjectId(userId)) {
+    return next(new CustomError(400, 'Invalid User Id'));
+  }
+
+  const updatedUser = await Auth.findByIdAndUpdate(userId, req.body, {
+    new: true,
+    runValidators: true,
+  });
+
+  if (!updatedUser) return next(new CustomError(404, 'User not found'));
+
+  return res.status(200).json({
+    success: true,
+    message: 'Profile updated successfully',
+    data: updatedUser,
+  });
+});
+
 export const logout = asyncHandler(async (req, res, next) => {
   const refreshToken = req?.cookies?.[getEnv('REFRESH_TOKEN_NAME')];
   if (refreshToken) await jwtService().removeRefreshToken(refreshToken);

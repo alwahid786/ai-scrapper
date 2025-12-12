@@ -8,6 +8,7 @@ import {
   updateSingleUser,
   deleteSingleUser,
   getSingleUser,
+  updateMyProfile,
 } from '../controllers/auth.controller.js';
 import { isAuthenticated } from '../middlewares/auth.middleware.js';
 import { isAdmin } from '../middlewares/admin.middleware.js';
@@ -24,6 +25,7 @@ router
   .put(isAuthenticated, isAdmin, updateSingleUser)
   .delete(isAuthenticated, isAdmin, deleteSingleUser);
 
+router.put('/updatemyprofile', isAuthenticated, updateMyProfile);
 router.post('/login', login);
 router.get('/myProfile', isAuthenticated, getMyProfile);
 router.get('/logout', logout);
