@@ -6,6 +6,9 @@ const config = Object.freeze({
   DB_URL: process.env.DB_URL,
   NODE_ENV: process.env.NODE_ENV,
 
+  GOOGLE_MAPS_API_KEY: process.env.GOOGLE_MAPS_API_KEY,
+  ZENROWS_API_KEY: process.env.ZENROWS_API_KEY,
+
   ACCESS_TOKEN_NAME: process.env.ACCESS_TOKEN_NAME,
   ACCESS_TOKEN_EXPIRY: process.env.ACCESS_TOKEN_EXPIRY,
   ACCESS_TOKEN_MAX_AGE: process.env.ACCESS_TOKEN_MAX_AGE,

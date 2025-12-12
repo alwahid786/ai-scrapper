@@ -4,8 +4,11 @@ import cors from 'cors';
 import AuthRoutes from './routes/auth.route.js';
 import GoogleRoutes from './routes/googleAuth.route.js';
 import errorHandler from './middlewares/errorHandler.js';
+
+import propertyRoutes from './routes/property.route.js';
 import session from 'express-session';
 import passport from 'passport';
+
 import './utils/googleAuth.js';
 
 const app = express();
@@ -52,6 +55,8 @@ app.get('/', (req, res) => {
 });
 app.use('/api/auth', AuthRoutes);
 app.use('/api/googleAuth', GoogleRoutes);
+
+app.use('/api/property', propertyRoutes);
 
 app.use(errorHandler);
 
