@@ -2,6 +2,7 @@ import express from 'express';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import AuthRoutes from './routes/auth.route.js';
+import GoogleRoutes from './routes/googleAuth.route.js';
 import errorHandler from './middlewares/errorHandler.js';
 import session from 'express-session';
 import passport from 'passport';
@@ -50,6 +51,7 @@ app.get('/', (req, res) => {
   res.json({ success: true, message: 'hello world' });
 });
 app.use('/api/auth', AuthRoutes);
+app.use('/api/googleAuth', GoogleRoutes);
 
 app.use(errorHandler);
 
