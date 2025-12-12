@@ -33,6 +33,7 @@ export const login = asyncHandler(async (req, res, next) => {
   if (!user || !user?._id) return next(new CustomError(400, 'Wrong email or password'));
   const matchPass = await bcrypt.compare(password, user.password);
   if (!matchPass) return next(new CustomError(400, 'Wrong password'));
+  console.log('eroiks;odfjilas;ldkjfa;osidj;foasdfji');
   await sendToken(res, next, user, 200, 'Logged in Successfully');
 });
 

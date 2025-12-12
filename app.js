@@ -46,11 +46,10 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use('/api/auth', AuthRoutes);
-
 app.get('/', (req, res) => {
   res.json({ success: true, message: 'hello world' });
 });
+app.use('/api/auth', AuthRoutes);
 
 app.use(errorHandler);
 
