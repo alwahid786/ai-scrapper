@@ -1,15 +1,10 @@
 import express from 'express';
-import {
-  normalize,
-  checkDuplicate,
-  fetchMetadata,
-  saveProperty,
-} from '../controllers/property.controller.js';
+import { address, fetchMetadata, saveProperty } from '../controllers/property.controller.js';
 
 const router = express.Router();
 
-router.post('/normalize', normalize);
-router.post('/checkduplicate', checkDuplicate);
+router.post('/normalize', address);
+
 router.post('/fetchmetadata', fetchMetadata);
 router.post('/save', saveProperty);
 

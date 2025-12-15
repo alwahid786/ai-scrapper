@@ -4,7 +4,6 @@ import cors from 'cors';
 import AuthRoutes from './routes/auth.route.js';
 import GoogleRoutes from './routes/googleAuth.route.js';
 import errorHandler from './middlewares/errorHandler.js';
-
 import propertyRoutes from './routes/property.route.js';
 import session from 'express-session';
 import passport from 'passport';

@@ -120,12 +120,23 @@ export const updateMyProfile = asyncHandler(async (req, res, next) => {
     return next(new CustomError(400, 'Invalid User Id'));
   }
 
+  // Check if email is being updated and is already in use by another user
+  if (req.body.email) {
+    const existingUser = await Auth.findOne({ email: req.body.email });
+    if (existingUser && existingUser._id.toString() !== userId) {
+      return next(new CustomError(400, 'Email is already in use by another account'));
+    }
+  }
+
+  // Update user profile
   const updatedUser = await Auth.findByIdAndUpdate(userId, req.body, {
     new: true,
     runValidators: true,
   });
 
-  if (!updatedUser) return next(new CustomError(404, 'User not found'));
+  if (!updatedUser) {
+    return next(new CustomError(404, 'User not found'));
+  }
 
   return res.status(200).json({
     success: true,

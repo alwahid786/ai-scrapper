@@ -1,13 +1,14 @@
 import axios from 'axios';
 
-// Free fallback address normalization using OpenStreetMap / Nominatim
+// Address normalization using OpenStreetMap
 export const normalizeAddress = async (address) => {
   if (!address) return null;
 
   try {
-    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(
-      address
-    )}&format=json&addressdetails=1`;
+    const baseUrl = process.env.ADDRESS_NORMALIZE_URL;
+    if (!baseUrl) throw new Error('ADDRESS_NORMALIZE_URL not defined in .env');
+
+    const url = `${baseUrl}?q=${encodeURIComponent(address)}&format=json&addressdetails=1`;
     const { data } = await axios.get(url, { headers: { 'User-Agent': 'my-app' } });
 
     if (!data || data.length === 0) return null;
