@@ -10,6 +10,7 @@ const isDev = getEnv('NODE_ENV') == 'development' || getEnv('NODE_ENV') == 'test
 export const accessTokenOptions = {
   httpOnly: true,
   sameSite: isDev ? 'lax' : 'none',
+  path: '/',
   secure: isDev ? false : true,
   maxAge: Number(getEnv('ACCESS_TOKEN_MAX_AGE')),
 };
@@ -17,6 +18,7 @@ export const accessTokenOptions = {
 export const refreshTokenOptions = {
   httpOnly: true,
   sameSite: isDev ? 'lax' : 'none',
+  path: '/',
   secure: isDev ? false : true,
   maxAge: Number(getEnv('REFRESH_TOKEN_MAX_AGE')),
 };
