@@ -24,6 +24,13 @@ export const Create = asyncHandler(async (req, res, next) => {
   return res.status(201).json({
     success: true,
     message: 'user created successfully',
+    user: {
+      _id: newUser._id,
+      name: newUser.name,
+      email: newUser.email,
+      createdBy: newUser.createdBy,
+      createdAt: newUser.createdAt,
+    },
   });
 });
 
