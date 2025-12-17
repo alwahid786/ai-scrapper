@@ -37,12 +37,7 @@ router.get(
   passport.authenticate('google', { session: false, failureRedirect: '/api/auth/login' }),
   async (req, res, next) => {
     if (!req.user) return res.status(400).json({ success: false, message: 'User not found' });
-    // try {
-    //   const tokenData = await sendToken(res, next, req.user, 200);
-    //   res.json({ success: true, ...tokenData });
-    // } catch (err) {
-    //   next(err);
-    // }
+
     try {
       const tokenData = await sendToken(res, next, req.user, 200, true);
       res.json({ success: true, ...tokenData });
