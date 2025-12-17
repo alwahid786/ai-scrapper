@@ -9,23 +9,23 @@ import { getEnv } from '../config/config.js';
 import { accessTokenOptions, refreshTokenOptions } from '../config/constants.js';
 
 export const Create = asyncHandler(async (req, res, next) => {
-//   if (!req.body) return next(new CustomError(400, 'Please provide all fields'));
-//   const { name, email, password } = req.body;
-//   if (!name || !email || !password) return next(new CustomError(400, 'Please provide all fields'));
-//   const user = await Auth.findOne({ email });
-//   if (user?._id) return next(new CustomError(403, 'Email already exists'));
-//   const newUser = await Auth.create({
-//     name,
-//     email,
-//     password,
-//     createdBy: req.user._id,
-//   });
-//   if (!newUser) return next(new CustomError(400, 'Error while registering user'));
-//   return res.status(201).json({
-//     success: true,
-//     message: 'user created successfully',
-//   });
-// });
+  if (!req.body) return next(new CustomError(400, 'Please provide all fields'));
+  const { name, email, password } = req.body;
+  if (!name || !email || !password) return next(new CustomError(400, 'Please provide all fields'));
+  const user = await Auth.findOne({ email });
+  if (user?._id) return next(new CustomError(403, 'Email already exists'));
+  const newUser = await Auth.create({
+    name,
+    email,
+    password,
+    createdBy: req.user._id,
+  });
+  if (!newUser) return next(new CustomError(400, 'Error while registering user'));
+  return res.status(201).json({
+    success: true,
+    message: 'user created successfully',
+  });
+});
 
 // export const Create = asyncHandler(async (req, res, next) => {
 //   // Check if body exists
