@@ -67,7 +67,7 @@ export const getSingleUser = asyncHandler(async (req, res, next) => {
     return next(new CustomError(400, 'Invalid User Id'));
   }
 
-  const user = await Auth.findOne({ userId, createdBy: req.user._id });
+  const user = await Auth.findOne({ _id: userId, createdBy: req.user._id });
   if (!user) return next(new CustomError(404, 'User not found or access denied'));
 
   return res.status(200).json({
@@ -83,10 +83,14 @@ export const updateSingleUser = asyncHandler(async (req, res, next) => {
     return next(new CustomError(400, 'Invalid User Id'));
   }
 
-  const updatedUser = await Auth.findByIdAndUpdate({ userId, createdBy: req.user._id }, req.body, {
-    new: true,
-    runValidators: true,
-  });
+  const updatedUser = await Auth.findByIdAndUpdate(
+    { _id: userId, createdBy: req.user._id },
+    req.body,
+    {
+      new: true,
+      runValidators: true,
+    }
+  );
 
   if (!updatedUser) return next(new CustomError(404, 'User not found or access denied'));
 
@@ -98,17 +102,16 @@ export const updateSingleUser = asyncHandler(async (req, res, next) => {
 });
 
 export const deleteSingleUser = asyncHandler(async (req, res, next) => {
+  const onwer = req.user;
   const { userId } = req.params;
 
   if (!isValidObjectId(userId)) {
     return next(new CustomError(400, 'Invalid User Id'));
   }
 
-  const user = await Auth.findOne({ userId, createdBy: req.user._id });
+  const user = await Auth.findOne({ _id: userId, createdBy: onwer._id });
   if (!user) return next(new CustomError(404, 'User not found or access denied'));
-
   await user.deleteOne();
-
   return res.status(200).json({
     success: true,
     message: 'User deleted successfully',
