@@ -121,22 +121,16 @@ export const updateMyProfile = asyncHandler(async (req, res, next) => {
     return next(new CustomError(400, 'Invalid User Id'));
   }
 
-  if (req.body.email) {
-    const existingUser = await Auth.findOne({ email: req.body.email });
-    if (existingUser && existingUser._id.toString() !== userId) {
-      return next(new CustomError(400, 'Email is already in use by another account'));
-    }
-  }
-
-  const updatedUser = await Auth.findByIdAndUpdate(userId, req.body, {
-    new: true,
-    runValidators: true,
-  });
+  const { name, email } = req.body;
+  const updatedUser = await Auth.findById(userId);
 
   if (!updatedUser) {
     return next(new CustomError(404, 'User not found'));
   }
 
+  if (name) updatedUser.name = name;
+  if (email) updatedUser.email = email;
+  await updatedUser.save();
   return res.status(200).json({
     success: true,
     message: 'Profile updated successfully',
@@ -147,7 +141,7 @@ export const updateMyProfile = asyncHandler(async (req, res, next) => {
 export const logout = asyncHandler(async (req, res, next) => {
   const refreshToken = req?.cookies?.[getEnv('REFRESH_TOKEN_NAME')];
   if (refreshToken) await jwtService().removeRefreshToken(refreshToken);
-  res.cookie(getEnv('ACCESS_TOKEN_NAME'), { ...accessTokenOptions, maxAge: 0 });
-  res.cookie(getEnv('REFRESH_TOKEN_NAME'), { ...refreshTokenOptions, maxAge: 0 });
+  res.cookie(getEnv('ACCESS_TOKEN_NAME'), '', { ...accessTokenOptions, maxAge: 0 });
+  res.cookie(getEnv('REFRESH_TOKEN_NAME'), '', { ...refreshTokenOptions, maxAge: 0 });
   return res.status(200).json({ success: true, message: 'Logged Out Successfully' });
 });
