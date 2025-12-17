@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { getEnv } from '../config/config.js'; // use your wrapper
+import { getEnv } from '../config/config.js';
 
 export const normalizeAddress = async (address) => {
   if (!address) return null;
