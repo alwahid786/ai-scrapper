@@ -18,6 +18,7 @@ export const Create = asyncHandler(async (req, res, next) => {
     name,
     email,
     password,
+    createdBy: req.user._id,
   });
   if (!newUser) return next(new CustomError(400, 'Error while registering user'));
   return res.status(201).json({
@@ -50,7 +51,7 @@ export const getMyProfile = asyncHandler(async (req, res, next) => {
 });
 
 export const getAllUsers = asyncHandler(async (req, res, next) => {
-  const users = await Auth.find();
+  const users = await Auth.find({ createdBy: req.user._id });
 
   return res.status(200).json({
     success: true,
@@ -66,8 +67,8 @@ export const getSingleUser = asyncHandler(async (req, res, next) => {
     return next(new CustomError(400, 'Invalid User Id'));
   }
 
-  const user = await Auth.findById(userId);
-  if (!user) return next(new CustomError(404, 'User not found'));
+  const user = await Auth.findOne({ userId, createdBy: req.user._id });
+  if (!user) return next(new CustomError(404, 'User not found or access denied'));
 
   return res.status(200).json({
     success: true,
@@ -82,12 +83,12 @@ export const updateSingleUser = asyncHandler(async (req, res, next) => {
     return next(new CustomError(400, 'Invalid User Id'));
   }
 
-  const updatedUser = await Auth.findByIdAndUpdate(userId, req.body, {
+  const updatedUser = await Auth.findByIdAndUpdate({ userId, createdBy: req.user._id }, req.body, {
     new: true,
     runValidators: true,
   });
 
-  if (!updatedUser) return next(new CustomError(404, 'User not found'));
+  if (!updatedUser) return next(new CustomError(404, 'User not found or access denied'));
 
   return res.status(200).json({
     success: true,
@@ -103,8 +104,8 @@ export const deleteSingleUser = asyncHandler(async (req, res, next) => {
     return next(new CustomError(400, 'Invalid User Id'));
   }
 
-  const user = await Auth.findById(userId);
-  if (!user) return next(new CustomError(404, 'User not found'));
+  const user = await Auth.findOne({ userId, createdBy: req.user._id });
+  if (!user) return next(new CustomError(404, 'User not found or access denied'));
 
   await user.deleteOne();
 
