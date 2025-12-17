@@ -9,6 +9,8 @@ import { getEnv } from '../config/config.js';
 import { accessTokenOptions, refreshTokenOptions } from '../config/constants.js';
 
 export const Create = asyncHandler(async (req, res, next) => {
+  const owner = req.user;
+  if (!owner?._id) return next(new CustomError(401, 'You are not logged in'));
   if (!req.body) return next(new CustomError(400, 'Please provide all fields'));
   const { name, email, password } = req.body;
   if (!name || !email || !password) return next(new CustomError(400, 'Please provide all fields'));
@@ -18,19 +20,12 @@ export const Create = asyncHandler(async (req, res, next) => {
     name,
     email,
     password,
-    createdBy: req.user._id,
+    createdBy: owner?._id,
   });
   if (!newUser) return next(new CustomError(400, 'Error while registering user'));
   return res.status(201).json({
     success: true,
     message: 'user created successfully',
-    user: {
-      _id: newUser._id,
-      name: newUser.name,
-      email: newUser.email,
-      createdBy: newUser.createdBy,
-      createdAt: newUser.createdAt,
-    },
   });
 });
 
