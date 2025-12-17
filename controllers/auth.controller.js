@@ -6,6 +6,7 @@ import { Auth } from '../models/auth.model.js';
 import { jwtService } from '../utils/jwtService.js';
 import { sendToken } from '../utils/sendToken.js';
 import { getEnv } from '../config/config.js';
+import { accessTokenOptions, refreshTokenOptions } from '../config/constants.js';
 
 export const Create = asyncHandler(async (req, res, next) => {
   if (!req.body) return next(new CustomError(400, 'Please provide all fields'));
@@ -114,13 +115,12 @@ export const deleteSingleUser = asyncHandler(async (req, res, next) => {
 });
 
 export const updateMyProfile = asyncHandler(async (req, res, next) => {
-  const userId = req.user.id; // get logged-in user's id from middleware
+  const userId = req.user.id;
 
   if (!isValidObjectId(userId)) {
     return next(new CustomError(400, 'Invalid User Id'));
   }
 
-  // Check if email is being updated and is already in use by another user
   if (req.body.email) {
     const existingUser = await Auth.findOne({ email: req.body.email });
     if (existingUser && existingUser._id.toString() !== userId) {
@@ -128,7 +128,6 @@ export const updateMyProfile = asyncHandler(async (req, res, next) => {
     }
   }
 
-  // Update user profile
   const updatedUser = await Auth.findByIdAndUpdate(userId, req.body, {
     new: true,
     runValidators: true,
@@ -148,7 +147,7 @@ export const updateMyProfile = asyncHandler(async (req, res, next) => {
 export const logout = asyncHandler(async (req, res, next) => {
   const refreshToken = req?.cookies?.[getEnv('REFRESH_TOKEN_NAME')];
   if (refreshToken) await jwtService().removeRefreshToken(refreshToken);
-  res.cookie(getEnv('ACCESS_TOKEN_NAME'), { maxAge: 0 });
-  res.cookie(getEnv('REFRESH_TOKEN_NAME'), { maxAge: 0 });
+  res.cookie(getEnv('ACCESS_TOKEN_NAME'), { ...accessTokenOptions, maxAge: 0 });
+  res.cookie(getEnv('REFRESH_TOKEN_NAME'), { ...refreshTokenOptions, maxAge: 0 });
   return res.status(200).json({ success: true, message: 'Logged Out Successfully' });
 });
