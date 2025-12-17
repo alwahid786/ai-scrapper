@@ -8,7 +8,7 @@ import { sendToken } from '../utils/sendToken.js';
 import { getEnv } from '../config/config.js';
 import { accessTokenOptions, refreshTokenOptions } from '../config/constants.js';
 
-// export const Create = asyncHandler(async (req, res, next) => {
+export const Create = asyncHandler(async (req, res, next) => {
 //   if (!req.body) return next(new CustomError(400, 'Please provide all fields'));
 //   const { name, email, password } = req.body;
 //   if (!name || !email || !password) return next(new CustomError(400, 'Please provide all fields'));
@@ -27,44 +27,44 @@ import { accessTokenOptions, refreshTokenOptions } from '../config/constants.js'
 //   });
 // });
 
-export const Create = asyncHandler(async (req, res, next) => {
-  // Check if body exists
-  if (!req.body) return next(new CustomError(400, 'Please provide all fields'));
+// export const Create = asyncHandler(async (req, res, next) => {
+//   // Check if body exists
+//   if (!req.body) return next(new CustomError(400, 'Please provide all fields'));
 
-  const { name, email, password } = req.body;
+//   const { name, email, password } = req.body;
 
-  // Check required fields
-  if (!name || !email || !password) return next(new CustomError(400, 'Please provide all fields'));
+//   // Check required fields
+//   if (!name || !email || !password) return next(new CustomError(400, 'Please provide all fields'));
 
-  // Check if user already exists
-  const existingUser = await Auth.findOne({ email });
-  if (existingUser) return next(new CustomError(403, 'Email already exists'));
+//   // Check if user already exists
+//   const existingUser = await Auth.findOne({ email });
+//   if (existingUser) return next(new CustomError(403, 'Email already exists'));
 
-  // Hash password
-  const salt = await bcrypt.genSalt(10);
-  const hashedPassword = await bcrypt.hash(password, salt);
+//   // Hash password
+//   const salt = await bcrypt.genSalt(10);
+//   const hashedPassword = await bcrypt.hash(password, salt);
 
-  // Create user
-  const newUser = await Auth.create({
-    name,
-    email,
-    password: hashedPassword,
-    owner: req.user._id,
-  });
+//   // Create user
+//   const newUser = await Auth.create({
+//     name,
+//     email,
+//     password: hashedPassword,
+//     owner: req.user._id,
+//   });
 
-  if (!newUser) return next(new CustomError(400, 'Error while creating user'));
+//   if (!newUser) return next(new CustomError(400, 'Error while creating user'));
 
-  return res.status(201).json({
-    success: true,
-    message: 'User created successfully',
-    user: {
-      id: newUser._id,
-      name: newUser.name,
-      email: newUser.email,
-      owner: newUser.owner,
-    },
-  });
-});
+//   return res.status(201).json({
+//     success: true,
+//     message: 'User created successfully',
+//     user: {
+//       id: newUser._id,
+//       name: newUser.name,
+//       email: newUser.email,
+//       owner: newUser.owner,
+//     },
+//   });
+// });
 
 export const login = asyncHandler(async (req, res, next) => {
   if (!req.body) return next(new CustomError(404, 'Please Provide Email and Password'));
