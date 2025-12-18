@@ -254,7 +254,7 @@ export const resetPassword = asyncHandler(async (req, res, next) => {
     return next(new CustomError(400, 'Passwords do not match'));
   }
 
-  const decoded = await jwtService().verifyToken(token, getEnv('VERIFICATION_TOKEN_SECRET'));
+  const decoded = await jwtService().tokenVerification(token, getEnv('VERIFICATION_TOKEN_SECRET'));
 
   if (!decoded?._id) {
     return next(new CustomError(400, 'Token Expired Try Again'));
