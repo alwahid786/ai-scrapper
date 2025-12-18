@@ -12,6 +12,7 @@
     "dev:ngrok": "ngrok http --url=camron-nonsubjective-informally.ngrok-free.dev 4000"
   },
   "dependencies": {
+    "@sendgrid/mail": "^8.1.6",
     "axios": "^1.13.2",
     "bcrypt": "^6.0.0",
     "body-parser": "^2.2.0",

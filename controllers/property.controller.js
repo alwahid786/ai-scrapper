@@ -174,6 +174,19 @@ export const fetchMetadata = async (req, res) => {
       return res.status(400).json({ error: 'formattedAddress or address required' });
     }
 
+    // If we have normalization info, detect country and avoid calling Zillow for non-US
+    const countryCode = normalized?.addressComponents?.country_code;
+    const isUS = (code) => {
+      if (!code) return /United States/i.test(targetAddress);
+      return ['us', 'usa', 'united states'].includes(String(code).toLowerCase());
+    };
+    if (countryCode && !isUS(countryCode)) {
+      return res.status(400).json({
+        error:
+          'Zillow covers primarily US properties. The provided address appears outside the US. Use a local data source or remove the country from the address to attempt a search.',
+      });
+    }
+
     // Check if property exists in DB
     existingProperty = await Property.findOne({ formattedAddress: targetAddress });
 
@@ -185,12 +198,25 @@ export const fetchMetadata = async (req, res) => {
       });
     }
 
-    console.log(`[fetchMetadata] Scraping Zillow for: ${targetAddress}`);
+    // Prefer a zillow-friendly query from normalization when available
+    const getZillowQuery = (addr, normalized) => {
+      if (normalized && normalized.zillowQuery) return normalized.zillowQuery;
+      if (!addr) return addr;
+      // strip trailing country names like 'United States'
+      return addr.replace(/,?\s*United States$/i, '').trim();
+    };
 
-    // Scrape Zillow metadata
-    const metadata = await scrapeZillow(targetAddress);
+    const zillowQuery = getZillowQuery(targetAddress, normalized);
+    console.log(`[fetchMetadata] Scraping Zillow for: ${zillowQuery} (original: ${targetAddress})`);
+
+    // Scrape Zillow metadata using a cleaned query
+    const metadata = await scrapeZillow(zillowQuery);
     if (!metadata) {
-      return res.status(500).json({ error: 'Failed to fetch property metadata from Zillow' });
+      return res.status(500).json({
+        error: 'Failed to fetch property metadata from Zillow',
+        zillowQuery,
+        hint: 'If this is a non-US property (e.g., United Kingdom), Zillow likely has no data. Use debug endpoint to capture HTML or integrate a regional data source.',
+      });
     }
 
     console.log(`[fetchMetadata] Metadata retrieved:`, {
@@ -268,8 +294,9 @@ export const debugHtml = async (req, res) => {
     const { formattedAddress, address } = req.body;
 
     let targetAddress = formattedAddress;
+    let normalized = null;
     if (!targetAddress && address) {
-      const normalized = await normalizeAddress(address);
+      normalized = await normalizeAddress(address);
       if (!normalized) {
         return res.status(400).json({ error: 'Cannot normalize address' });
       }
@@ -280,13 +307,21 @@ export const debugHtml = async (req, res) => {
       return res.status(400).json({ error: 'formattedAddress or address required' });
     }
 
-    console.log(`[debugHtml] Fetching raw HTML for: ${targetAddress}`);
+    // Build zillow-friendly query
+    const getZillowQuery = (addr, normalized) => {
+      if (normalized && normalized.zillowQuery) return normalized.zillowQuery;
+      if (!addr) return addr;
+      return addr.replace(/,?\s*United States$/i, '').trim();
+    };
+
+    const zillowQuery = getZillowQuery(targetAddress, normalized);
+    console.log(`[debugHtml] Fetching raw HTML for: ${zillowQuery} (original: ${targetAddress})`);
 
     // Import the fetchWithFallback function from scrapezillow
     const { fetchWithFallback } = await import('../utils/scrapezillow.js');
 
     // Get ZPID first
-    const searchURL = `https://www.zillow.com/homes/${encodeURIComponent(targetAddress)}/`;
+    const searchURL = `https://www.zillow.com/homes/${encodeURIComponent(zillowQuery)}/`;
     const { data: searchHTML } = await fetchWithFallback(searchURL);
 
     let zpid = null;

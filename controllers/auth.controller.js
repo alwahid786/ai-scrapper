@@ -5,7 +5,9 @@ import { asyncHandler } from '../utils/asyncHandler.js';
 import { Auth } from '../models/auth.model.js';
 import { jwtService } from '../utils/jwtService.js';
 import { sendToken } from '../utils/sendToken.js';
+import { sendMail } from '../utils/sendMail.js';
 import { getEnv } from '../config/config.js';
+import { returnMailPage } from '../utils/htmlPages.js';
 import { accessTokenOptions, refreshTokenOptions } from '../config/constants.js';
 
 export const Create = asyncHandler(async (req, res, next) => {
@@ -13,24 +15,63 @@ export const Create = asyncHandler(async (req, res, next) => {
 
   if (!owner?._id) return next(new CustomError(401, 'You are not logged in'));
   if (!req.body) return next(new CustomError(400, 'Please provide all fields'));
-  const { name, email, password } = req.body;
-  if (!name || !email || !password) return next(new CustomError(400, 'Please provide all fields'));
+  const { name, email } = req.body;
+  if (!name || !email) return next(new CustomError(400, 'Please provide all fields'));
   const user = await Auth.findOne({ email });
   if (user?._id) return next(new CustomError(403, 'Email already exists'));
   const newUser = await Auth.create({
     name,
     email,
-    password,
+
     createdBy: owner?._id,
   });
+
   if (!newUser) return next(new CustomError(400, 'Error while registering user'));
+  const token = await jwtService().verificationToken(String(newUser._id));
+  const setupPasswordUrl = `${getEnv('SET_PASSWORD_URL')}/${token}`;
+
+  const mailHtml = returnMailPage(newUser.name, setupPasswordUrl);
+
+  const isMailSent = await sendMail(email, 'Set Your Password', mailHtml, true);
+  if (!isMailSent) return next(new CustomError(500, 'Failed to send email'));
+
   return res.status(201).json({
     success: true,
-    message: 'user created successfully',
+    message: 'user created successfully. Email sent to set passowrd',
     user: newUser,
   });
 });
 
+export const setupPassword = asyncHandler(async (req, res, next) => {
+  const { token, password, confirmPassword } = req.body;
+
+  if (!token || !password || !confirmPassword) {
+    return next(new CustomError(400, 'Please provide token and password'));
+  }
+
+  if (password !== confirmPassword) {
+    return next(new CustomError(400, 'Passwords do not match'));
+  }
+
+  const decoded = await jwtService().tokenVerification(
+    token,
+    process.env.VERIFICATION_TOKEN_SECRET
+  );
+  if (!decoded?._id) {
+    return next(new CustomError(400, 'Token expired or invalid'));
+  }
+
+  const user = await Auth.findById(decoded._id).select('+password');
+  if (!user) return next(new CustomError(404, 'User not found'));
+
+  user.password = password;
+  await user.save();
+
+  return res.status(200).json({
+    success: true,
+    message: 'Password set successfully. You can now login.',
+  });
+});
 export const login = asyncHandler(async (req, res, next) => {
   if (!req.body) return next(new CustomError(404, 'Please Provide Email and Password'));
   const { email, password } = req.body;
@@ -152,4 +193,84 @@ export const logout = asyncHandler(async (req, res, next) => {
   res.cookie(getEnv('ACCESS_TOKEN_NAME'), '', { ...accessTokenOptions, maxAge: 0 });
   res.cookie(getEnv('REFRESH_TOKEN_NAME'), '', { ...refreshTokenOptions, maxAge: 0 });
   return res.status(200).json({ success: true, message: 'Logged Out Successfully' });
+});
+
+export const forgetPassword = asyncHandler(async (req, res, next) => {
+  if (!req?.body) {
+    return next(new CustomError(400, 'Please Provide Email'));
+  }
+
+  const { email } = req.body;
+  if (!email) {
+    return next(new CustomError(400, 'Please Provide Email'));
+  }
+
+  const user = await Auth.findOne({ email });
+  if (!user?._id) {
+    return next(new CustomError(404, 'User Not Found'));
+  }
+
+  // generate verification token
+  const token = await jwtService().verificationToken(String(user._id));
+  console.log('Generated token:', token);
+  if (!token) {
+    return next(new CustomError(400, 'Error While Generating Token'));
+  }
+
+  const resetPasswordUrl = `${getEnv('RESET_PASSWORD_URL')}/${token}`;
+
+  const mailHtml = returnMailPage(resetPasswordUrl);
+
+  // sendMail(to, subject, text/html, html = false)
+  const isMailSent = await sendMail(
+    email,
+    'Reset Password',
+    mailHtml,
+    true // html email
+  );
+
+  if (!isMailSent) {
+    return next(new CustomError(500, 'Some Error Occurred While Sending Mail'));
+  }
+
+  return res.status(200).json({
+    success: true,
+    message: 'Reset Password Link Sent Successfully Check Your MailBox',
+  });
+});
+
+export const resetPassword = asyncHandler(async (req, res, next) => {
+  if (!req?.body) {
+    return next(new CustomError(400, 'Please Provide Reset Token and New Password'));
+  }
+
+  const { password, confirmPassword, token } = req.body;
+
+  if (!token || !password || !confirmPassword) {
+    return next(new CustomError(400, 'Please Provide Reset Token and New Password'));
+  }
+
+  if (password !== confirmPassword) {
+    return next(new CustomError(400, 'Passwords do not match'));
+  }
+
+  const decoded = await jwtService().verifyToken(token, getEnv('VERIFICATION_TOKEN_SECRET'));
+
+  if (!decoded?._id) {
+    return next(new CustomError(400, 'Token Expired Try Again'));
+  }
+
+  const user = await Auth.findById(decoded._id).select('+password');
+  if (!user) {
+    return next(new CustomError(400, 'User Not Found'));
+  }
+
+  // hashing handled by pre('save') hook
+  user.password = password;
+  await user.save();
+
+  return res.status(200).json({
+    success: true,
+    message: 'Password Reset Successfully Now You Can Login',
+  });
 });

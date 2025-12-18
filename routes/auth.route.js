@@ -9,6 +9,9 @@ import {
   deleteSingleUser,
   getSingleUser,
   updateMyProfile,
+  forgetPassword,
+  resetPassword,
+  setupPassword,
 } from '../controllers/auth.controller.js';
 import { isAuthenticated } from '../middlewares/auth.middleware.js';
 import { isAdmin } from '../middlewares/admin.middleware.js';
@@ -19,6 +22,7 @@ const router = express.Router();
 
 router.post('/create', isAuthenticated, isAdmin, Create);
 router.get('/all', isAuthenticated, isAdmin, getAllUsers);
+router.post('/setpassword', setupPassword);
 router
   .route('/single/:userId')
   .get(isAuthenticated, isAdmin, getSingleUser)
@@ -28,6 +32,8 @@ router
 router.put('/updatemyprofile', isAuthenticated, updateMyProfile);
 router.post('/login', login);
 router.get('/myProfile', isAuthenticated, getMyProfile);
+router.post('/forgetpassword', isAuthenticated, forgetPassword);
+router.post('/resetpassword', isAuthenticated, resetPassword);
 router.get('/logout', logout);
 
 router.get('/google', passport.authenticate('google', { scope: ['profile', 'email'] }));

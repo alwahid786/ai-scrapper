@@ -14,7 +14,8 @@ const propertySchema = new mongoose.Schema(
     propertyType: String,
     lastSoldDate: Date,
     lastSoldPrice: Number,
-    estimatedValue: Number,
+    // estimatedValue: Number,
+    price: Number,
   },
   { timestamps: true }
 );
