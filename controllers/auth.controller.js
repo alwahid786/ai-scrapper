@@ -28,7 +28,7 @@ export const Create = asyncHandler(async (req, res, next) => {
 
   if (!newUser) return next(new CustomError(400, 'Error while registering user'));
   const token = await jwtService().verificationToken(String(newUser._id));
-  const setupPasswordUrl = `${getEnv('SET_PASSWORD_URL')}/${token}`;
+  const setupPasswordUrl = `${getEnv('RESET_PASSWORD_URL')}/${token}`;
 
   const mailHtml = returnMailPage(newUser.name, setupPasswordUrl);
 
