@@ -171,6 +171,9 @@ export const updateMyProfile = asyncHandler(async (req, res, next) => {
   }
 
   const { name, email } = req.body;
+  if (!name && !email) {
+    return next(new CustomError(404, 'Please Enter Something'));
+  }
   const updatedUser = await Auth.findById(userId);
 
   if (!updatedUser) {
