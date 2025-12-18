@@ -32,8 +32,8 @@ router
 router.put('/updatemyprofile', isAuthenticated, updateMyProfile);
 router.post('/login', login);
 router.get('/myProfile', isAuthenticated, getMyProfile);
-router.post('/forgetpassword', isAuthenticated, forgetPassword);
-router.post('/resetpassword', isAuthenticated, resetPassword);
+router.post('/forgetpassword', forgetPassword);
+router.post('/resetpassword', resetPassword);
 router.get('/logout', logout);
 
 router.get('/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
