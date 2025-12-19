@@ -17,7 +17,10 @@ export const Create = asyncHandler(async (req, res, next) => {
   const { name, email } = req.body;
   if (!name || !email) return next(new CustomError(400, 'Please provide all fields'));
   const user = await Auth.findOne({ email });
-  if (user?._id) return next(new CustomError(403, 'Email already exists'));
+  if (user?._id) {
+    console.log('lskjdflskdfj');
+    return next(new CustomError(403, 'Email already exists'));
+  }
 
   const newUser = await Auth.create({
     name,
