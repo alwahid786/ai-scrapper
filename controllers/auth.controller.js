@@ -179,8 +179,8 @@ export const updateMyProfile = asyncHandler(async (req, res, next) => {
     return next(new CustomError(400, 'Invalid User Id'));
   }
 
-  const { name, email } = req.body;
-  if (!name && !email) {
+  const { name } = req.body;
+  if (!name) {
     return next(new CustomError(404, 'Please Enter Something'));
   }
   const updatedUser = await Auth.findById(userId);
@@ -190,7 +190,7 @@ export const updateMyProfile = asyncHandler(async (req, res, next) => {
   }
 
   if (name) updatedUser.name = name;
-  if (email) updatedUser.email = email;
+
   await updatedUser.save();
   return res.status(200).json({
     success: true,
