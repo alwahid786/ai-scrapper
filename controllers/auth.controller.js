@@ -12,28 +12,34 @@ import { accessTokenOptions, refreshTokenOptions } from '../config/constants.js'
 
 export const Create = asyncHandler(async (req, res, next) => {
   const owner = req.user;
-
   if (!owner?._id) return next(new CustomError(401, 'You are not logged in'));
   if (!req.body) return next(new CustomError(400, 'Please provide all fields'));
   const { name, email } = req.body;
   if (!name || !email) return next(new CustomError(400, 'Please provide all fields'));
   const user = await Auth.findOne({ email });
   if (user?._id) return next(new CustomError(403, 'Email already exists'));
+
   const newUser = await Auth.create({
     name,
     email,
     password: '1234567890',
     createdBy: owner?._id,
   });
-
   if (!newUser) return next(new CustomError(400, 'Error while registering user'));
+
   const token = await jwtService().verificationToken(String(newUser._id));
   const setupPasswordUrl = `${getEnv('RESET_PASSWORD_URL')}/${token}`;
-
   const mailHtml = returnMailPage(newUser.name, setupPasswordUrl);
-
   const isMailSent = await sendMail(email, 'Set Your Password', mailHtml, true);
-  if (!isMailSent) return next(new CustomError(500, 'Failed to send email'));
+  if (!isMailSent) {
+    await Auth.findByIdAndDelete(newUser?._id);
+    return next(
+      new CustomError(
+        500,
+        'Email delivery failed. Please ensure the email address is valid and try again'
+      )
+    );
+  }
 
   return res.status(201).json({
     success: true,
