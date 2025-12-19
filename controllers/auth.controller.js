@@ -38,7 +38,7 @@ export const Create = asyncHandler(async (req, res, next) => {
     await Auth.findByIdAndDelete(newUser?._id);
     return next(
       new CustomError(
-        500,
+        400,
         'Email delivery failed. Please ensure the email address is valid and try again'
       )
     );
