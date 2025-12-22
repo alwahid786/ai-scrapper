@@ -4,6 +4,7 @@ import {
   fetchMetadata,
   saveProperty,
   debugHtml,
+  searchProperties,
 } from '../controllers/property.controller.js';
 
 const router = express.Router();
@@ -11,6 +12,7 @@ const router = express.Router();
 router.post('/normalize', address);
 
 router.post('/fetchmetadata', fetchMetadata);
+router.post('/searchproperties', searchProperties);
 router.post('/save', saveProperty);
 
 //for debugging HTML content

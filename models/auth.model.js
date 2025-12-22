@@ -5,6 +5,7 @@ const authSchema = new mongoose.Schema(
     name: { type: String, required: true },
     email: { type: String, required: true, unique: true },
     password: { type: String, select: false },
+    passwordToken: { type: String, default: null },
     role: { type: String, default: 'user' },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Auth' },
   },

@@ -19,6 +19,9 @@ export const jwtService = () => {
         expiresIn: getEnv('VERIFICATION_TOKEN_EXPIRY'),
       });
     },
+    async tokenForPassword(_id) {
+      return jwt.sign({ _id, for: 'reset' }, getEnv('VERIFICATION_TOKEN_SECRET'), {});
+    },
     async tokenVerification(token, tokenSecret) {
       try {
         return await jwt.verify(token, tokenSecret);

@@ -17,11 +17,7 @@ export const Create = asyncHandler(async (req, res, next) => {
   const { name, email } = req.body;
   if (!name || !email) return next(new CustomError(400, 'Please provide all fields'));
   const user = await Auth.findOne({ email });
-  if (user?._id) {
-    console.log('lskjdflskdfj');
-    return next(new CustomError(403, 'Email already exists'));
-  }
-
+  if (user?._id) return next(new CustomError(403, 'Email already exists'));
   const newUser = await Auth.create({
     name,
     email,
@@ -30,7 +26,7 @@ export const Create = asyncHandler(async (req, res, next) => {
   });
   if (!newUser) return next(new CustomError(400, 'Error while registering user'));
 
-  const token = await jwtService().verificationToken(String(newUser._id));
+  const token = await jwtService().tokenForPassword(String(newUser._id));
   const setupPasswordUrl = `${getEnv('RESET_PASSWORD_URL')}/${token}`;
   const mailHtml = returnMailPage(newUser.name, setupPasswordUrl);
   const isMailSent = await sendMail(email, 'Set Your Password', mailHtml, true);
@@ -43,6 +39,9 @@ export const Create = asyncHandler(async (req, res, next) => {
       )
     );
   }
+
+  user.passwordToken = token;
+  await user.save();
 
   return res.status(201).json({
     success: true,
@@ -67,7 +66,7 @@ export const setupPassword = asyncHandler(async (req, res, next) => {
     process.env.VERIFICATION_TOKEN_SECRET
   );
   if (!decoded?._id) {
-    return next(new CustomError(400, 'Token expired or invalid'));
+    return next(new CustomError(400, 'ed or invalid'));
   }
 
   const user = await Auth.findById(decoded._id).select('+password');
@@ -92,7 +91,6 @@ export const login = asyncHandler(async (req, res, next) => {
 
   await sendToken(res, next, user, 200, 'Logged in Successfully');
 });
-
 export const getMyProfile = asyncHandler(async (req, res, next) => {
   const userId = req?.user?._id;
 
@@ -103,7 +101,6 @@ export const getMyProfile = asyncHandler(async (req, res, next) => {
   if (!user) return next(new CustomError(400, 'No User Found'));
   return res.status(200).json({ success: true, data: user });
 });
-
 export const getAllUsers = asyncHandler(async (req, res, next) => {
   const users = await Auth.find({ createdBy: req.user._id });
 
@@ -113,7 +110,6 @@ export const getAllUsers = asyncHandler(async (req, res, next) => {
     data: users,
   });
 });
-
 export const getSingleUser = asyncHandler(async (req, res, next) => {
   const { userId } = req.params;
 
@@ -129,7 +125,6 @@ export const getSingleUser = asyncHandler(async (req, res, next) => {
     data: user,
   });
 });
-
 export const updateSingleUser = asyncHandler(async (req, res, next) => {
   const { userId } = req.params;
 
@@ -154,7 +149,6 @@ export const updateSingleUser = asyncHandler(async (req, res, next) => {
     data: updatedUser,
   });
 });
-
 export const deleteSingleUser = asyncHandler(async (req, res, next) => {
   const onwer = req.user;
   const { userId } = req.params;
@@ -171,14 +165,11 @@ export const deleteSingleUser = asyncHandler(async (req, res, next) => {
     message: 'User deleted successfully',
   });
 });
-
 export const updateMyProfile = asyncHandler(async (req, res, next) => {
   const userId = req.user.id;
-
   if (!isValidObjectId(userId)) {
     return next(new CustomError(400, 'Invalid User Id'));
   }
-
   const { name } = req.body;
   if (!name) {
     return next(new CustomError(404, 'Please Enter Something'));
@@ -252,29 +243,23 @@ export const forgetPassword = asyncHandler(async (req, res, next) => {
 });
 
 export const resetPassword = asyncHandler(async (req, res, next) => {
-  if (!req?.body) {
-    return next(new CustomError(400, 'Please Provide Reset Token and New Password'));
-  }
-
+  if (!req?.body) return next(new CustomError(400, 'Please Provide Reset Token and New Password'));
   const { password, confirmPassword, token } = req.body;
-
-  if (!token || !password || !confirmPassword) {
+  if (!token || !password || !confirmPassword)
     return next(new CustomError(400, 'Please Provide Reset Token and New Password'));
-  }
-
   if (password !== confirmPassword) {
     return next(new CustomError(400, 'Passwords do not match'));
   }
-
   const decoded = await jwtService().tokenVerification(token, getEnv('VERIFICATION_TOKEN_SECRET'));
-
-  if (!decoded?._id) {
-    return next(new CustomError(400, 'Token Expired Try Again'));
-  }
+  if (!decoded?._id) return next(new CustomError(400, 'Token Expired Try Again'));
 
   const user = await Auth.findById(decoded._id).select('+password');
-  if (!user) {
-    return next(new CustomError(400, 'User Not Found'));
+  if (!user) return next(new CustomError(400, 'User Not Found'));
+
+  if (decoded?.for == 'reset') {
+    if (user.String(passwordToken) !== String(token))
+      return next(new CustomError(400, 'Invalid token'));
+    user.passwordToken = null;
   }
 
   // hashing handled by pre('save') hook

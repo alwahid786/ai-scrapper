@@ -1,6 +1,8 @@
 import Property from '../models/property.js';
 import { normalizeAddress } from '../utils/addressUtils.js';
 import { scrapeZillow } from '../utils/scrapezillow.js';
+import { scrapeZillowSearch } from '../utils/zillowSearchPuppeteer.js';
+
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -48,109 +50,6 @@ export const address = async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 };
-
-// export const fetchMetadata = async (req, res) => {
-//   try {
-//     const { formattedAddress, address } = req.body;
-
-//     // Accept either formattedAddress or raw address
-//     let targetAddress = formattedAddress;
-//     let existingProperty = null;
-
-//     // If raw address provided, normalize it first
-//     if (!targetAddress && address) {
-//       const normalized = await normalizeAddress(address);
-//       if (!normalized) {
-//         return res.status(400).json({ error: 'Cannot normalize address' });
-//       }
-//       targetAddress = normalized.formattedAddress;
-//     }
-
-//     if (!targetAddress) {
-//       return res.status(400).json({ error: 'formattedAddress or address required' });
-//     }
-
-//     // Check if property exists in DB
-//     existingProperty = await Property.findOne({ formattedAddress: targetAddress });
-
-//     // If property exists and has metadata, skip scraping
-//     if (existingProperty && existingProperty.zpid) {
-//       return res.json({
-//         message: 'Property metadata already exists in database',
-//         property: existingProperty,
-//       });
-//     }
-
-//     console.log(`[fetchMetadata] Scraping Zillow for: ${targetAddress}`);
-
-//     // Scrape Zillow metadata
-//     const metadata = await scrapeZillow(targetAddress);
-//     if (!metadata) {
-//       return res.status(500).json({ error: 'Failed to fetch property metadata from Zillow' });
-//     }
-
-//     console.log(`[fetchMetadata] Metadata retrieved:`, {
-//       zpid: metadata.zpid,
-//       beds: metadata.beds,
-//       price: metadata.price,
-//     });
-
-//     // Update or create property in DB
-//     let property;
-//     if (existingProperty) {
-//       // Update existing property with metadata
-//       property = await Property.findByIdAndUpdate(
-//         existingProperty._id,
-//         {
-//           ...metadata,
-//           formattedAddress: targetAddress,
-//         },
-//         { new: true }
-//       );
-//     } else {
-//       // Create new property
-//       property = new Property({
-//         formattedAddress: targetAddress,
-//         rawAddress: address || targetAddress,
-//         ...metadata,
-//       });
-//       await property.save();
-//     }
-
-//     res.json({
-//       message: 'Property metadata fetched and saved successfully',
-//       property,
-//     });
-//   } catch (err) {
-//     console.error('fetchMetadata error:', err.message);
-//     res.status(500).json({ error: 'Internal server error: ' + err.message });
-//   }
-// };
-
-//     const { zillowURL, formattedAddress } = req.body;
-
-//     if (!zillowURL) return res.status(400).json({ error: 'zillowURL required' });
-
-//     // Check DB
-//     const property = await Property.findOne({ formattedAddress });
-//     if (!property) return res.status(404).json({ error: 'Property not found in database' });
-
-//     // Scrape metadata using the exact property URL
-//     const metadata = await scrapeZillow(zillowURL);
-//     if (!metadata) return res.status(500).json({ error: 'Failed to fetch property metadata' });
-
-//     res.json({
-//       message: 'Property metadata fetched successfully',
-//       property: {
-//         ...property.toObject(),
-//         metadata,
-//       },
-//     });
-//   } catch (err) {
-//     console.error('fetchMetadata error:', err.message);
-//     res.status(500).json({ error: 'Internal server error' });
-//   }
-// };
 
 export const fetchMetadata = async (req, res) => {
   try {
@@ -286,6 +185,20 @@ export const saveProperty = async (req, res) => {
     console.error(err.message);
     res.status(500).json({ error: 'Failed to save property' });
   }
+};
+
+export const searchProperties = async (req, res) => {
+  const properties = await scrapeZillowSearch(req.body, 20);
+
+  if (!properties.length) {
+    return res.status(404).json({ message: 'No properties found' });
+  }
+
+  res.json({
+    message: 'Properties fetched successfully',
+    count: properties.length,
+    properties,
+  });
 };
 
 // Debug endpoint: capture raw HTML for inspection
