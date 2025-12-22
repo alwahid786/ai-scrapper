@@ -40,8 +40,8 @@ export const Create = asyncHandler(async (req, res, next) => {
     );
   }
 
-  user.passwordToken = token;
-  await user.save();
+  newUser.resetPasswordToken = token;
+  await newUser.save();
 
   return res.status(201).json({
     success: true,
@@ -236,6 +236,9 @@ export const forgetPassword = asyncHandler(async (req, res, next) => {
     return next(new CustomError(500, 'Some Error Occurred While Sending Mail'));
   }
 
+  user.resetPasswordToken = token;
+  await user.save();
+
   return res.status(200).json({
     success: true,
     message: 'Reset Password Link Sent Successfully Check Your MailBox',
@@ -256,16 +259,13 @@ export const resetPassword = asyncHandler(async (req, res, next) => {
   const user = await Auth.findById(decoded._id).select('+password');
   if (!user) return next(new CustomError(400, 'User Not Found'));
 
-  if (decoded?.for == 'reset') {
-    if (user.String(passwordToken) !== String(token))
-      return next(new CustomError(400, 'Invalid token'));
-    user.passwordToken = null;
+  if (user.resetPasswordToken !== String(token)) {
+    return next(new CustomError(400, 'Invalid token'));
   }
-
+  user.resetPasswordToken = null;
   // hashing handled by pre('save') hook
   user.password = password;
   await user.save();
-
   return res.status(200).json({
     success: true,
     message: 'Password Reset Successfully Now You Can Login',
