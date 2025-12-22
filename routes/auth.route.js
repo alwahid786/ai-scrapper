@@ -20,7 +20,7 @@ import { sendToken } from '../utils/sendToken.js';
 
 const router = express.Router();
 
-router.post('/create', Create);
+router.post('/create', isAuthenticated, isAdmin, Create);
 router.get('/all', isAuthenticated, isAdmin, getAllUsers);
 router.post('/setpassword', setupPassword);
 router
