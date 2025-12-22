@@ -11,8 +11,8 @@ import { returnMailPage } from '../utils/htmlPages.js';
 import { accessTokenOptions, refreshTokenOptions } from '../config/constants.js';
 
 export const Create = asyncHandler(async (req, res, next) => {
-  const owner = req.user;
-  if (!owner?._id) return next(new CustomError(401, 'You are not logged in'));
+  // const owner = req.user;
+  // if (!owner?._id) return next(new CustomError(401, 'You are not logged in'));
   if (!req.body) return next(new CustomError(400, 'Please provide all fields'));
   const { name, email } = req.body;
   if (!name || !email) return next(new CustomError(400, 'Please provide all fields'));
@@ -22,26 +22,26 @@ export const Create = asyncHandler(async (req, res, next) => {
     name,
     email,
     password: '1234567890',
-    createdBy: owner?._id,
+    // createdBy: owner?._id,
   });
   if (!newUser) return next(new CustomError(400, 'Error while registering user'));
 
-  const token = await jwtService().tokenForPassword(String(newUser._id));
-  const setupPasswordUrl = `${getEnv('RESET_PASSWORD_URL')}/${token}`;
-  const mailHtml = returnMailPage(newUser.name, setupPasswordUrl);
-  const isMailSent = await sendMail(email, 'Set Your Password', mailHtml, true);
-  if (!isMailSent) {
-    await Auth.findByIdAndDelete(newUser?._id);
-    return next(
-      new CustomError(
-        400,
-        'Email delivery failed. Please ensure the email address is valid and try again'
-      )
-    );
-  }
+  // const token = await jwtService().tokenForPassword(String(newUser._id));
+  // const setupPasswordUrl = `${getEnv('RESET_PASSWORD_URL')}/${token}`;
+  // const mailHtml = returnMailPage(newUser.name, setupPasswordUrl);
+  // const isMailSent = await sendMail(email, 'Set Your Password', mailHtml, true);
+  // if (!isMailSent) {
+  //   await Auth.findByIdAndDelete(newUser?._id);
+  //   return next(
+  //     new CustomError(
+  //       400,
+  //       'Email delivery failed. Please ensure the email address is valid and try again'
+  //     )
+  //   );
+  // }
 
-  newUser.resetPasswordToken = token;
-  await newUser.save();
+  // newUser.resetPasswordToken = token;
+  // await newUser.save();
 
   return res.status(201).json({
     success: true,
@@ -132,13 +132,15 @@ export const updateSingleUser = asyncHandler(async (req, res, next) => {
     return next(new CustomError(400, 'Invalid User Id'));
   }
 
+  const { name, role, password } = req.body;
+  if (!name && !role && !password) {
+    return next(new CustomError(400, 'Enter something for update'));
+  }
+
   const updatedUser = await Auth.findByIdAndUpdate(
     { _id: userId, createdBy: req.user._id },
-    req.body,
-    {
-      new: true,
-      runValidators: true,
-    }
+    { name, role, password },
+    { new: true }
   );
 
   if (!updatedUser) return next(new CustomError(404, 'User not found or access denied'));
