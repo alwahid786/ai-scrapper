@@ -132,7 +132,7 @@ const returnMailPage = (name, setupPasswordUrl) => `
 <body>
   <div class="container">
     <h2>Hello ${name},</h2>
-    <p>You have been added to our system. Please click the button below to set your password:</p>
+    <p>We received a request to reset your password. Click the button below to continue:</p>
     <a href="${setupPasswordUrl}" class="btn" target="_blank">Set Password</a>
     <p>If you did not expect this email, you can ignore it.</p>
     <div class="footer">&copy; ${new Date().getFullYear()} Your Company. All rights reserved.</div>
