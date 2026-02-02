@@ -37,7 +37,9 @@
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "streamifier": "^0.1.1",
     "stripe": "^19.1.0",
-    "zenrows": "^2.0.1"
+    "zenrows": "^2.0.1",
+    "@google/generative-ai": "^0.21.0",
+    "sharp": "^0.33.0"
   },
   "devDependencies": {
     "ngrok": "^5.0.0-beta.2"

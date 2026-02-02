@@ -5,6 +5,7 @@ import AuthRoutes from './routes/auth.route.js';
 import GoogleRoutes from './routes/googleAuth.route.js';
 import errorHandler from './middlewares/errorHandler.js';
 import propertyRoutes from './routes/property.route.js';
+import compsRoutes from './routes/comps.route.js';
 import session from 'express-session';
 import passport from 'passport';
 
@@ -61,6 +62,7 @@ app.use('/api/auth', AuthRoutes);
 app.use('/api/googleAuth', GoogleRoutes);
 
 app.use('/api/property', propertyRoutes);
+app.use('/api/comps', compsRoutes);
 
 app.use(errorHandler);
 
