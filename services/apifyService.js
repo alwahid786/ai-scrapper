@@ -643,9 +643,14 @@ export const scrapeZillowProperties = async (searchParams) => {
 
   console.log('📤 Zillow Apify input:', JSON.stringify(input, null, 2));
   console.log('🔗 Zillow search URL:', searchUrl);
-  
+
+  // axesso_data/zillow-search-by-address-scraper expects payload under "input" key
+  const actorPayload = ZILLOW_ACTOR_ID && ZILLOW_ACTOR_ID.includes('axesso_data')
+    ? { input }
+    : input;
+
   try {
-    const result = await runApifyActor(ZILLOW_ACTOR_ID, input);
+    const result = await runApifyActor(ZILLOW_ACTOR_ID, actorPayload);
     console.log('📥 Zillow Apify result:', { 
       success: result.success, 
       dataLength: result.data?.length || 0,
@@ -734,6 +739,179 @@ export const scrapeZillowProperties = async (searchParams) => {
       data: [], 
       error: error.message,
       message: 'Zillow scraping failed' 
+    };
+  }
+};
+
+/**
+ * Scrape Zillow SOLD properties using the dedicated sold actor (igolaizola/zillow-scraper-ppe).
+ * Used for comparable sales search. Input follows actor's form: location, operation "sold",
+ * maxSoldDate, minBeds/maxBeds, minBaths, minPrice/maxPrice, optional minSize/maxSize.
+ * @param {Object} searchParams - { address, city, state, postalCode, latitude, longitude, radiusMiles, propertyType, soldWithinMonths, minPrice, maxPrice, minBeds, maxBeds, minBaths, minSqft, maxSqft }
+ * @returns {{ success: boolean, data: Array }}
+ */
+export const scrapeZillowSoldProperties = async (searchParams) => {
+  const {
+    address,
+    city,
+    state,
+    postalCode,
+    latitude,
+    longitude,
+    radiusMiles = 1,
+    propertyType,
+    minPrice,
+    maxPrice,
+    minBeds,
+    maxBeds,
+    minBaths,
+    minSqft,
+    maxSqft,
+    soldWithinMonths = 6,
+  } = searchParams;
+
+  const ZILLOW_SOLD_ACTOR_ID = process.env.APIFY_ZILLOW_SOLD_ACTOR_ID;
+
+  if (!ZILLOW_SOLD_ACTOR_ID) {
+    console.warn('APIFY_ZILLOW_SOLD_ACTOR_ID not configured');
+    return { success: false, data: [], message: 'Zillow Sold actor not configured' };
+  }
+
+  let extractedCity = city;
+  let extractedState = state;
+  let extractedZip = postalCode;
+
+  if (!extractedCity || !extractedState) {
+    if (address) {
+      const addressParts = address.split(',').map((s) => s.trim()).filter(Boolean);
+      for (let i = 0; i < addressParts.length; i++) {
+        const part = addressParts[i];
+        if (/^[A-Z]{2}$/i.test(part)) {
+          extractedState = part.toUpperCase();
+          if (i > 0) extractedCity = addressParts[i - 1];
+          const zipMatch = part.match(/\d{5}/) || (addressParts[i + 1] && addressParts[i + 1].match(/\d{5}/));
+          if (zipMatch) extractedZip = zipMatch[0];
+          break;
+        }
+      }
+      if (!extractedCity && addressParts.length > 0) extractedCity = addressParts[0];
+    }
+  }
+
+  const locationStr = extractedCity && extractedState
+    ? `${extractedCity}, ${extractedState}`
+    : (address || (latitude && longitude ? `${latitude},${longitude}` : ''));
+
+  if (!locationStr) {
+    return { success: false, data: [], message: 'Location (city/state or address) required for Zillow Sold search' };
+  }
+
+  if (soldWithinMonths <= 0) {
+    return { success: false, data: [], message: 'soldWithinMonths must be positive' };
+  }
+
+  const maxSoldDate = soldWithinMonths <= 1 ? '1m' : soldWithinMonths <= 3 ? '3m' : soldWithinMonths <= 6 ? '6m' : soldWithinMonths <= 12 ? '1y' : soldWithinMonths <= 24 ? '2y' : '3y';
+
+  // igolaizola/zillow-scraper-ppe only accepts specific minSize/maxSize values
+  const ZILLOW_SOLD_ALLOWED_SQFT = ['', '500', '750', '1000', '1250', '1500', '1750', '2000', '2250', '2500', '2750', '3000', '3500', '4000', '5000', '7500'];
+  const snapSqftToAllowed = (val) => {
+    if (val == null || val <= 0) return '';
+    const num = Number(val);
+    const allowed = ZILLOW_SOLD_ALLOWED_SQFT.filter((s) => s !== '').map(Number);
+    const nearest = allowed.reduce((prev, curr) => (Math.abs(curr - num) < Math.abs(prev - num) ? curr : prev));
+    return String(nearest);
+  };
+
+  const input = {
+    location: locationStr,
+    operation: 'sold',
+    maxSoldDate,
+    sortBy: 'newest',
+    maxItems: 1000,
+    minBeds: minBeds != null ? minBeds : 0,
+    maxBeds: maxBeds != null ? maxBeds : 0,
+    minBaths: minBaths != null ? minBaths : 0,
+    minPrice: minPrice != null ? minPrice : 0,
+    maxPrice: maxPrice != null ? maxPrice : 0,
+    minSize: minSqft != null && minSqft > 0 ? snapSqftToAllowed(minSqft) : '',
+    maxSize: maxSqft != null && maxSqft > 0 ? snapSqftToAllowed(maxSqft) : '',
+    minLotSize: '',
+    maxLotSize: '',
+    timeOnZillow: '',
+    maxHoaFees: '',
+    parkingSpots: '',
+    pets: [],
+    "3dTour": false,
+    acceptingBackupOffers: false,
+    acceptsZillowApplications: false,
+    agentListed: true,
+    airConditioning: false,
+    apartmentCommunity: false,
+    auction: true,
+    basement: false,
+    comingSoon: true,
+    disabilityAccess: false,
+    elevator: false,
+    foreclosed: false,
+    foreclosure: true,
+    furnished: false,
+    garage: false,
+    hardwoodFloors: false,
+    hideNoMoveInDate: false,
+    highSpeedInternet: false,
+    inUnitLaundry: false,
+    incomeRestricted: false,
+    locationType: '',
+    newConstruction: true,
+    onSiteParking: false,
+    openHouse: false,
+    outdoorSpace: false,
+    ownerPosted: true,
+    pendingUnderContract: false,
+    pool: false,
+    preForeclosure: false,
+    priceDrop: false,
+    shortTermLease: false,
+    singleStory: false,
+    showcase: false,
+    tourScheduling: false,
+    utilitiesIncluded: false,
+    waterfront: false,
+  };
+
+  if (propertyType) {
+    const t = (propertyType || '').toLowerCase();
+    if (t.includes('single') || t.includes('house') || t === 'house') input.propertyType = 'singleFamily';
+    else if (t.includes('condo')) input.propertyType = 'condo';
+    else if (t.includes('town')) input.propertyType = 'townhouse';
+    else if (t.includes('multi') || t.includes('duplex')) input.propertyType = 'multiFamily';
+    else if (t.includes('manufactured') || t.includes('mobile')) input.propertyType = 'manufactured';
+    else if (t.includes('lot') || t.includes('vacant')) input.propertyType = 'lot';
+  }
+
+  Object.keys(input).forEach((key) => {
+    if (input[key] === null || input[key] === undefined) delete input[key];
+  });
+
+  console.log('🔍 Zillow Sold actor input:', JSON.stringify({ ...input, location: input.location, operation: input.operation, maxSoldDate: input.maxSoldDate, minBeds: input.minBeds, maxBeds: input.maxBeds, minBaths: input.minBaths, minPrice: input.minPrice, maxPrice: input.maxPrice }, null, 2));
+
+  try {
+    const result = await runApifyActor(ZILLOW_SOLD_ACTOR_ID, input);
+    if (!result.success) {
+      console.error('❌ Zillow Sold actor failed:', result.error || result.message);
+      return result;
+    }
+    if (result.data && result.data.length > 0) {
+      console.log('✅ Zillow Sold actor returned', result.data.length, 'properties');
+    }
+    return result;
+  } catch (error) {
+    console.error('❌ Zillow Sold scraping error:', error.message);
+    return {
+      success: false,
+      data: [],
+      error: error.message,
+      message: 'Zillow Sold scraping failed',
     };
   }
 };
@@ -1423,7 +1601,16 @@ export const normalizePropertyData = (rawData, source) => {
     console.warn(`Invalid rawData from ${source}:`, rawData);
     return null;
   }
-  
+
+  // Some actors (e.g. Zillow Sold) return items wrapped as { property: {...} } or { data: {...} }; unwrap so we read price/address etc.
+  if ((source === 'zillow-sold' || source === 'zillow') && !rawData.price && !rawData.address) {
+    if (rawData.property && typeof rawData.property === 'object' && (rawData.property.price || rawData.property.zpid || rawData.property.address)) {
+      rawData = rawData.property;
+    } else if (rawData.data && typeof rawData.data === 'object' && (rawData.data.price || rawData.data.zpid || rawData.data.address)) {
+      rawData = rawData.data;
+    }
+  }
+
   // Check if this is the new actor format (burbn/zillow-home-scraper-by-url)
   const isNewActorFormat = rawData.zpid !== undefined && rawData.zillowUrl !== undefined && rawData.photos !== undefined;
   
@@ -1496,54 +1683,74 @@ export const normalizePropertyData = (rawData, source) => {
   };
 
   // Try to extract price from various fields
-  // For SOLD properties, price.value is the sale price
-  // For FOR SALE properties, price.value is the listing price
+  // For FOR_SALE: price = current list price (what we show as "listed price")
+  // For SOLD: price = sale price
   const getPrice = () => {
-    // Check nested price object (Zillow format: price.value)
-    // This works for both for sale and sold properties
-    if (rawData.price && typeof rawData.price === 'object') {
-      if (rawData.price.value) return parseFloat(rawData.price.value) || null;
-      if (rawData.price.amount) return parseFloat(rawData.price.amount) || null;
-      if (rawData.price.price) return parseFloat(rawData.price.price) || null;
+    const homeStatus = (rawData.homeStatus || rawData.listing?.listingStatus || rawData.listingStatus || rawData.status || '').toString().toUpperCase();
+    const isForSale = homeStatus === 'FOR_SALE' || homeStatus === 'FOR SALE' || (homeStatus && !homeStatus.includes('SOLD'));
+
+    // For FOR_SALE properties, prefer current listing price (do not use lastSoldPrice as the displayed price)
+    if (isForSale) {
+      // Nested price object (Zillow: price.value)
+      if (rawData.price && typeof rawData.price === 'object') {
+        if (rawData.price.value != null) return parseFloat(rawData.price.value) || null;
+        if (rawData.price.amount != null) return parseFloat(rawData.price.amount) || null;
+        if (rawData.price.price != null) return parseFloat(rawData.price.price) || null;
+      }
+      // Direct listing price (number) - e.g. Zillow detail API returns price: 315000
+      if (rawData.price != null && typeof rawData.price === 'number') {
+        return parseFloat(rawData.price) || null;
+      }
+      if (rawData.listPrice != null) return parseFloat(rawData.listPrice) || null;
+      if (rawData.askingPrice != null) return parseFloat(rawData.askingPrice) || null;
     }
-    
-    // Check for sale-specific fields (for sold properties)
-    if (rawData.salePrice) {
-      // Handle nested salePrice.value structure
-      if (typeof rawData.salePrice === 'object' && rawData.salePrice.value) {
+
+    // For SOLD or when not for sale: check nested price object
+    if (rawData.price && typeof rawData.price === 'object') {
+      if (rawData.price.value != null) return parseFloat(rawData.price.value) || null;
+      if (rawData.price.amount != null) return parseFloat(rawData.price.amount) || null;
+      if (rawData.price.price != null) return parseFloat(rawData.price.price) || null;
+    }
+
+    // Fallbacks: sale price or last sold (when no listing price)
+    if (rawData.salePrice != null) {
+      if (typeof rawData.salePrice === 'object' && rawData.salePrice.value != null) {
         return parseFloat(rawData.salePrice.value) || null;
       }
       return parseFloat(rawData.salePrice) || null;
     }
-    if (rawData.lastSoldPrice) return parseFloat(rawData.lastSoldPrice) || null;
-    
-    // Then check for current listing price (direct number)
-    if (rawData.price && typeof rawData.price === 'number') {
+    if (rawData.listPrice != null) return parseFloat(rawData.listPrice) || null;
+    if (rawData.askingPrice != null) return parseFloat(rawData.askingPrice) || null;
+    if (rawData.lastSoldPrice != null) return parseFloat(rawData.lastSoldPrice) || null;
+
+    // Direct price number (when status was not clearly for-sale)
+    if (rawData.price != null && typeof rawData.price === 'number') {
       return parseFloat(rawData.price) || null;
     }
-    if (rawData.listPrice) return parseFloat(rawData.listPrice) || null;
-    if (rawData.askingPrice) return parseFloat(rawData.askingPrice) || null;
-    
+
     return null;
   };
   
   // Try to extract sale price separately (for sold properties)
   const getSalePrice = () => {
+    // Zillow Sold actor: listing.listingStatus = "recentlySold", price.value = sale price, hdpView.price = sale price
+    const listingStatus = (rawData.listing?.listingStatus || rawData.listingStatus || rawData.status || '').toLowerCase();
+    const marketingStatus = (rawData.listing?.marketingStatus || '').toLowerCase();
+    const isSold = listingStatus === 'sold' || listingStatus.includes('sold') || marketingStatus === 'closed';
+
     // For SOLD properties, price.value is the sale price
-    // Check nested price object first (Zillow format: price.value)
     if (rawData.price && typeof rawData.price === 'object') {
-      const listingStatus = (rawData.listing?.listingStatus || rawData.listingStatus || rawData.status || '').toLowerCase();
-      // If status is sold, price.value is the sale price
-      if (listingStatus === 'sold' || listingStatus.includes('sold')) {
-        if (rawData.price.value) {
-          return parseFloat(rawData.price.value) || null;
-        }
-        if (rawData.price.amount) {
-          return parseFloat(rawData.price.amount) || null;
-        }
+      if (isSold || rawData.price.value != null) {
+        if (rawData.price.value != null) return parseFloat(rawData.price.value) || null;
+        if (rawData.price.amount != null) return parseFloat(rawData.price.amount) || null;
       }
     }
-    
+
+    // Zillow Sold actor: hdpView.price is the sale amount (number)
+    if (isSold && rawData.hdpView && rawData.hdpView.price != null) {
+      return parseFloat(rawData.hdpView.price) || null;
+    }
+
     // Check direct sale price fields
     if (rawData.salePrice) {
       // Handle nested salePrice.value structure
@@ -1555,18 +1762,11 @@ export const normalizePropertyData = (rawData, source) => {
     if (rawData.lastSoldPrice) return parseFloat(rawData.lastSoldPrice) || null;
     if (rawData.soldPrice) return parseFloat(rawData.soldPrice) || null;
     if (rawData.closingPrice) return parseFloat(rawData.closingPrice) || null;
-    
-    // If price exists and listingStatus is sold, use price.value as salePrice
-    const listingStatus = (rawData.listing?.listingStatus || rawData.listingStatus || rawData.status || '').toLowerCase();
-    if (listingStatus === 'sold' || listingStatus.includes('sold')) {
-      if (rawData.price) {
-        if (typeof rawData.price === 'object' && rawData.price.value) {
-          return parseFloat(rawData.price.value) || null;
-        }
-        if (typeof rawData.price === 'number') {
-          return parseFloat(rawData.price) || null;
-        }
-      }
+
+    // Last resort for sold comps: use root price when status isn't clearly for-sale (sold actors may only expose price)
+    if (listingStatus !== 'for_sale' && listingStatus !== 'active' && marketingStatus !== 'for_sale' && rawData.price != null) {
+      if (typeof rawData.price === 'object' && rawData.price.value != null) return parseFloat(rawData.price.value) || null;
+      if (typeof rawData.price === 'number') return parseFloat(rawData.price) || null;
     }
     return null;
   };
@@ -1631,6 +1831,7 @@ export const normalizePropertyData = (rawData, source) => {
   
   // Try to extract estimated value (Zestimate or similar)
   const getEstimatedValue = () => {
+    if (rawData.estimates && rawData.estimates.zestimate != null) return parseFloat(rawData.estimates.zestimate) || null;
     if (rawData.zestimate) return parseFloat(rawData.zestimate) || null;
     if (rawData.estimatedValue) return parseFloat(rawData.estimatedValue) || null;
     if (rawData.priceEstimate) return parseFloat(rawData.priceEstimate) || null;
@@ -1642,11 +1843,17 @@ export const normalizePropertyData = (rawData, source) => {
     return null;
   };
 
-  // Extract listing status (handle nested structure)
+  // Extract listing status (handle nested structure; "recentlySold" / "closed" from sold actor = sold)
   const getListingStatus = () => {
-    // Check nested listing object (Zillow format: listing.listingStatus)
+    // Check nested listing object (Zillow format: listing.listingStatus, sold actor: recentlySold; marketingStatus: closed)
     if (rawData.listing && rawData.listing.listingStatus) {
-      return rawData.listing.listingStatus.toLowerCase();
+      const s = rawData.listing.listingStatus.toLowerCase();
+      if (s === 'recentlysold') return 'sold';
+      return s;
+    }
+    if (rawData.listing && rawData.listing.marketingStatus) {
+      const m = rawData.listing.marketingStatus.toLowerCase();
+      if (m === 'closed') return 'sold';
     }
     // Check root level
     if (rawData.listingStatus) return rawData.listingStatus.toLowerCase();
@@ -1693,7 +1900,7 @@ export const normalizePropertyData = (rawData, source) => {
     beds: rawData.beds ? parseInt(rawData.beds) : (rawData.bedrooms ? parseInt(rawData.bedrooms) : (rawData.bed ? parseInt(rawData.bed) : null)),
     baths: rawData.baths ? parseFloat(rawData.baths) : (rawData.bathrooms ? parseFloat(rawData.bathrooms) : (rawData.bath ? parseFloat(rawData.bath) : null)),
     squareFootage: rawData.squareFootage ? parseInt(rawData.squareFootage) : (rawData.sqft ? parseInt(rawData.sqft) : (rawData.livingArea ? parseInt(rawData.livingArea) : (rawData.squareFeet ? parseInt(rawData.squareFeet) : null))),
-    lotSize: rawData.lotSize ? parseInt(rawData.lotSize) : (rawData.lotArea ? parseInt(rawData.lotArea) : (rawData.lotSquareFeet ? parseInt(rawData.lotSquareFeet) : null)),
+    lotSize: rawData.lotSize ? parseInt(rawData.lotSize) : (rawData.lotArea ? parseInt(rawData.lotArea) : (rawData.lotSquareFeet ? parseInt(rawData.lotSquareFeet) : (rawData.lotSizeWithUnit?.lotSize != null && rawData.lotSizeWithUnit?.lotSizeUnit === 'acres' ? Math.round(rawData.lotSizeWithUnit.lotSize * 43560) : null))),
     yearBuilt: rawData.yearBuilt ? parseInt(rawData.yearBuilt) : (rawData.year ? parseInt(rawData.year) : null),
     propertyType: rawData.propertyType || rawData.homeType || rawData.type || rawData.propertyTypeName || null,
     saleDate: getSaleDate(),
@@ -1743,19 +1950,13 @@ export const normalizePropertyData = (rawData, source) => {
  */
 const extractImages = (rawData, source) => {
   const images = [];
-  
-  // Check for new actor format (burbn/zillow-home-scraper-by-url) - has direct photos array
-  if (Array.isArray(rawData.photos) && rawData.photos.length > 0) {
-    images.push(...rawData.photos.filter(url => typeof url === 'string' && url.startsWith('http')));
-    console.log(`📸 Extracted ${images.length} images from new actor format photos array`);
-    // Return early if we found photos in new format
-    if (images.length > 0) {
-      return images;
-    }
-  }
-  
-  // Zillow format: media.propertyPhotoLinks or media.images or photos array
+
+  // Zillow format: prefer media.allPropertyPhotos first (full gallery) so we don't get only 1 image
   if (rawData.media) {
+    // Zillow Sold actor (igolaizola): media.allPropertyPhotos.highResolution is array of all photo URLs
+    if (rawData.media.allPropertyPhotos && rawData.media.allPropertyPhotos.highResolution && Array.isArray(rawData.media.allPropertyPhotos.highResolution)) {
+      images.push(...rawData.media.allPropertyPhotos.highResolution.filter(url => typeof url === 'string' && url.startsWith('http')));
+    }
     // Zillow photos array (actual property photos) - check multiple possible structures
     if (Array.isArray(rawData.media.photos)) {
       rawData.media.photos.forEach(photo => {

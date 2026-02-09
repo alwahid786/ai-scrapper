@@ -2,14 +2,14 @@ import Property from '../models/property.js';
 import { normalizeAddress } from '../services/googleMapsService.js';
 import {
   scrapeZillowProperties,
-  scrapeRedfinProperties,
-  scrapeRealtorProperties,
+  // scrapeRedfinProperties,
+  // scrapeRealtorProperties,
   normalizePropertyData,
   fetchZillowPropertyDetails,
   fetchZillowPropertyDetailsByUrl,
   scrapePropertyByAddress,
 } from '../services/apifyService.js';
-import { enhancePropertyImages } from '../services/geminiService.js';
+// import { enhancePropertyImages } from '../services/geminiService.js'; // Image enhancement disabled - show images as-is
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { CustomError } from '../utils/CustomError.js';
 
@@ -113,27 +113,13 @@ export const fetchPropertyDetails = async (req, res) => {
           });
         }
         
-        // Enhance blurry images using Gemini
-        let finalImages = normalized.images || [];
-        if (finalImages.length > 0) {
-          try {
-            console.log(`🔍 Enhancing blurry images for property...`);
-            finalImages = await enhancePropertyImages(finalImages, {
-              address: normalized.address || normalized.formattedAddress,
-              propertyType: normalized.propertyType,
-            });
-            console.log(`✅ Image enhancement complete. ${finalImages.length} images ready.`);
-          } catch (enhanceError) {
-            console.error('Error enhancing images:', enhanceError.message);
-            // Continue with original images if enhancement fails
-            console.log('Using original images due to enhancement error');
-          }
-        }
-        
+        // Use images as-is (enhancement disabled)
+        const finalImages = normalized.images || [];
+
         // Update property in database if propertyId was provided
         if (property && propertyId) {
           // Update property with full details
-          property.images = finalImages; // Use enhanced images
+          property.images = finalImages;
           property.price = normalized.price || property.price;
           property.salePrice = normalized.salePrice || property.salePrice;
           property.beds = normalized.beds || property.beds;
@@ -153,17 +139,16 @@ export const fetchPropertyDetails = async (req, res) => {
           console.log(`✅ Updated property ${propertyId} with full details and ${finalImages.length} images`);
         }
         
-        // Return full property details with enhanced images
+        // Return full property details with images as-is
         return res.status(200).json({
           success: true,
-          message: `Fetched full property details with ${finalImages.length} images (enhanced)`,
+          message: `Fetched full property details with ${finalImages.length} images`,
           property: {
             ...normalized,
-            images: finalImages, // Use enhanced images
-            // Include raw property data for reference
+            images: finalImages,
             rawData: fullDetails.property,
           },
-          images: finalImages, // Use enhanced images
+          images: finalImages,
           imageCount: finalImages.length,
         });
       } else {
@@ -272,27 +257,13 @@ export const fetchPropertyDetails = async (req, res) => {
       });
     }
     
-    // Enhance all images to higher resolution and quality
-    let finalImages = normalized.images || [];
-    if (finalImages.length > 0) {
-      try {
-        console.log(`🔍 Enhancing ${finalImages.length} images to higher resolution and quality...`);
-        finalImages = await enhancePropertyImages(finalImages, {
-          address: normalized.address || normalized.formattedAddress,
-          propertyType: normalized.propertyType,
-        });
-        console.log(`✅ Image enhancement complete. ${finalImages.length} high-resolution images ready.`);
-      } catch (enhanceError) {
-        console.error('Error enhancing images:', enhanceError.message);
-        // Continue with original images if enhancement fails
-        console.log('⚠️ Using original images due to enhancement error');
-      }
-    }
-    
+    // Use images as-is (enhancement disabled)
+    const finalImages = normalized.images || [];
+
     // Update property in database if propertyId was provided
     if (property && propertyId) {
       // Update property with full details
-      property.images = finalImages; // Use enhanced images
+      property.images = finalImages;
       property.price = normalized.price || property.price;
       property.salePrice = normalized.salePrice || property.salePrice;
       property.beds = normalized.beds || property.beds;
@@ -312,17 +283,16 @@ export const fetchPropertyDetails = async (req, res) => {
       console.log(`✅ Updated property ${propertyId} with full details and ${finalImages.length} images`);
     }
     
-    // Return full property details with enhanced images
+    // Return full property details with images as-is
     res.status(200).json({
       success: true,
-      message: `Fetched full property details with ${finalImages.length} images (enhanced)`,
+      message: `Fetched full property details with ${finalImages.length} images`,
       property: {
         ...normalized,
-        images: finalImages, // Use enhanced images
-        // Include raw property data for reference
+        images: finalImages,
         rawData: fullDetails.property,
       },
-      images: finalImages, // Use enhanced images
+      images: finalImages,
       imageCount: finalImages.length,
     });
   } catch (error) {
@@ -648,32 +618,34 @@ export const searchProperties = async (req, res) => {
 
     console.log('Searching for ACTIVE/UNSOLD properties (user will select one, then we find SOLD comps)');
 
-    // Try multiple sources in priority order
+    // Zillow only for now; Redfin/Realtor commented out (uncomment in sources + switch to re-enable)
     const allProperties = [];
-    const sources = ['zillow', 'redfin', 'realtor'];
+    const sources = ['zillow']; // ['zillow', 'redfin', 'realtor'] when re-enabled
 
     console.log('Starting property search with params:', searchParams);
 
     for (const source of sources) {
       try {
         console.log(`\n=== 🔍 Searching ${source.toUpperCase()} ===`);
-        console.log(`Search params:`, {
+        console.log('Search params:', {
           address: searchAddress,
           coordinates: searchLat && searchLng ? `${searchLat}, ${searchLng}` : 'none',
           radius: `${searchRadius} miles`,
         });
-        
+
         let results;
         switch (source) {
           case 'zillow':
             results = await scrapeZillowProperties(searchParams);
             break;
-          case 'redfin':
-            results = await scrapeRedfinProperties(searchParams);
-            break;
-          case 'realtor':
-            results = await scrapeRealtorProperties(searchParams);
-            break;
+          // case 'redfin':
+          //   results = await scrapeRedfinProperties(searchParams);
+          //   break;
+          // case 'realtor':
+          //   results = await scrapeRealtorProperties(searchParams);
+          //   break;
+          default:
+            results = { success: false, data: [] };
         }
 
         console.log(`${source} raw results:`, {
@@ -685,7 +657,7 @@ export const searchProperties = async (req, res) => {
 
         if (results?.success && results.data && Array.isArray(results.data)) {
           console.log(`${source} returned ${results.data.length} properties`);
-          
+
           // Normalize and filter properties
           for (const rawData of results.data) {
             try {
@@ -830,7 +802,7 @@ export const searchProperties = async (req, res) => {
                   propertyType: normalized.propertyType || null,
                   yearBuilt: normalized.yearBuilt || null,
                   lotSize: normalized.lotSize || null,
-                  source: source, // Which platform this came from
+                  source: source,
                   status: normalized.listingStatus === 'sold' ? 'sold' : 'active',
                   propertyType: normalized.propertyType || null,
                   lotSize: normalized.lotSize || null,
@@ -854,16 +826,12 @@ export const searchProperties = async (req, res) => {
               console.error('Raw data:', JSON.stringify(rawData, null, 2));
             }
           }
-
-          // Continue searching all sources (no early break)
-          // We'll return all properties found, up to maxResults from each source
         } else {
           console.log(`${source} search failed or returned no data:`, results);
         }
       } catch (error) {
         console.error(`Error fetching from ${source}:`, error.message);
         console.error('Error stack:', error.stack);
-        // Continue to next source
       }
     }
 
@@ -918,23 +886,19 @@ export const searchProperties = async (req, res) => {
     if (limitedProperties.length === 0) {
       console.error('No properties found after filtering');
       
-      // Check if Apify actors are configured
+      // Check which sources are configured (Zillow required for now; others commented out)
       const actorsConfigured = {
-        zillow: !!(process.env.APIFY_ZILLOW_ACTOR_ID || process.env.ZILLOW_ACTOR_ID) && 
-                (process.env.APIFY_ZILLOW_ACTOR_ID || process.env.ZILLOW_ACTOR_ID) !== 'your-zillow-actor-id',
-        redfin: !!(process.env.APIFY_REDFIN_ACTOR_ID || process.env.REDFIN_ACTOR_ID) && 
-                (process.env.APIFY_REDFIN_ACTOR_ID || process.env.REDFIN_ACTOR_ID) !== 'your-redfin-actor-id',
-        realtor: !!(process.env.APIFY_REALTOR_ACTOR_ID || process.env.REALTOR_ACTOR_ID) && 
-                 (process.env.APIFY_REALTOR_ACTOR_ID || process.env.REALTOR_ACTOR_ID) !== 'your-realtor-actor-id',
+        zillow: !!(process.env.APIFY_ZILLOW_ACTOR_ID || process.env.ZILLOW_ACTOR_ID) &&
+          (process.env.APIFY_ZILLOW_ACTOR_ID || process.env.ZILLOW_ACTOR_ID) !== 'your-zillow-actor-id',
+        // redfin: !!(process.env.APIFY_REDFIN_ACTOR_ID || process.env.REDFIN_ACTOR_ID) && ...,
+        // realtor: !!(process.env.APIFY_REALTOR_ACTOR_ID || process.env.REALTOR_ACTOR_ID) && ...,
       };
 
-      const configuredCount = Object.values(actorsConfigured).filter(Boolean).length;
-
-      if (configuredCount === 0) {
-        return res.status(503).json({ 
+      if (!actorsConfigured.zillow) {
+        return res.status(503).json({
           message: 'Apify actors not configured',
-          error: 'Please configure at least one Apify actor ID in your .env file',
-          help: 'Add APIFY_ZILLOW_ACTOR_ID, APIFY_REDFIN_ACTOR_ID, or APIFY_REALTOR_ACTOR_ID',
+          error: 'Please configure APIFY_ZILLOW_ACTOR_ID (or ZILLOW_ACTOR_ID) in your .env file',
+          help: 'Add APIFY_ZILLOW_ACTOR_ID. Optionally add APIFY_REDFIN_ACTOR_ID, APIFY_REALTOR_ACTOR_ID when re-enabled.',
           actorsConfigured,
           searchParams: {
             address: searchAddress,
@@ -944,8 +908,7 @@ export const searchProperties = async (req, res) => {
         });
       }
 
-      // If actors are configured but no results, provide detailed feedback
-      return res.status(404).json({ 
+      return res.status(404).json({
         message: 'No active/unsold properties found matching your criteria',
         searchParams: {
           address: searchAddress,
@@ -1021,24 +984,8 @@ export const searchPropertyByAddress = asyncHandler(async (req, res, next) => {
 
   const propertyData = result.data;
 
-  // Enhance all images to higher resolution and quality
-  let finalImages = propertyData.images || [];
-  if (finalImages.length > 0) {
-    try {
-      console.log(`🔍 Enhancing ${finalImages.length} images to higher resolution and quality...`);
-      finalImages = await enhancePropertyImages(finalImages, {
-        address: propertyData.address || propertyData.formattedAddress,
-        propertyType: propertyData.propertyType,
-      });
-      console.log(`✅ Image enhancement complete. ${finalImages.length} high-resolution images ready.`);
-    } catch (enhanceError) {
-      console.error('Error enhancing images:', enhanceError.message);
-      // Continue with original images if enhancement fails
-      console.log('⚠️ Using original images due to enhancement error');
-    }
-  }
-
-  // Update property data with enhanced images
+  // Use images as-is (enhancement disabled)
+  const finalImages = propertyData.images || [];
   propertyData.images = finalImages;
 
   // Save or update property in database

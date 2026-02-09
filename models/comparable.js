@@ -30,7 +30,7 @@ const comparableSchema = new mongoose.Schema(
     // Data source
     dataSource: {
       type: String,
-      enum: ['mls', 'zillow', 'redfin', 'realtor', 'county'],
+      enum: ['mls', 'zillow', 'zillow-sold', 'redfin', 'realtor', 'county'],
       required: true,
     },
     sourceId: String, // External ID from source

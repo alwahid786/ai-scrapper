@@ -5,10 +5,9 @@ import ImageAnalysis from '../models/imageAnalysis.js';
 import { normalizeAddress, calculateDistance, getDefaultRadius, determineAreaType } from './googleMapsService.js';
 import {
   scrapeZillowProperties,
-  scrapeRedfinProperties,
-  scrapeRealtorProperties,
-  // scrapeMLSProperties, // Commented out - not configured in env
-  // scrapeCountyProperties, // Commented out - not configured in env
+  scrapeZillowSoldProperties,
+  // scrapeRedfinProperties,
+  // scrapeRealtorProperties,
   normalizePropertyData,
 } from './apifyService.js';
 import { analyzePropertyImages, aggregateImageAnalyses } from './geminiService.js';
@@ -70,7 +69,8 @@ export const prepareSubjectProperty = async (address, images = [], skipImageAnal
   // Also fetch images if not provided
   if (!property.beds || !property.baths || !property.squareFootage || (imageUrls.length === 0 && !property.images)) {
     // Try to fetch metadata from Apify
-    const { scrapeZillowProperties, scrapeRedfinProperties, normalizePropertyData } = await import('./apifyService.js');
+    const { scrapeZillowProperties, normalizePropertyData } = await import('./apifyService.js');
+    // const { scrapeRedfinProperties } = await import('./apifyService.js'); // uncomment for Redfin fallback
     const searchParams = {
       address: normalized.formattedAddress,
       latitude: normalized.latitude,
@@ -81,13 +81,11 @@ export const prepareSubjectProperty = async (address, images = [], skipImageAnal
     };
 
     try {
-      // Try Zillow first
+      // Zillow only for now; other platforms commented out
       let results = await scrapeZillowProperties(searchParams);
-      if (!results?.success || !results.data || results.data.length === 0) {
-        // Fallback to Redfin
-        results = await scrapeRedfinProperties(searchParams);
-      }
-      
+      // if (!results?.success || !results.data || results.data.length === 0) {
+      //   results = await scrapeRedfinProperties(searchParams);
+      // }
       if (results?.success && results.data && results.data.length > 0) {
         const normalizedData = normalizePropertyData(results.data[0], results.data[0].source || 'zillow');
         
@@ -210,8 +208,8 @@ export const prepareCompSearch = (subjectProperty, areaType) => {
   // Max radius allows for expansion: urban can expand to 0.75, suburban to 1.5, rural to 2.5
   const maxRadius = areaType === 'urban' ? 0.75 : areaType === 'suburban' ? 1.5 : 2.5;
 
-  // 2.2 Define Time Window
-  const preferredMonths = 6;
+  // 2.2 Define Time Window - prefer sold within 12 months (doc: expand to 12 months if necessary)
+  const preferredMonths = 12;
   const maxMonths = 12;
 
   // 2.3 Attribute Matching Requirements
@@ -238,10 +236,9 @@ export const prepareCompSearch = (subjectProperty, areaType) => {
 
 /**
  * PHASE 3: Data Source Priority Flow
- * IMPORTANT: This searches for SOLD properties as comparables
- * Priority order: Zillow > Redfin > Realtor.com
- * Note: MLS and County commented out - not configured in env
- * 
+ * IMPORTANT: This searches for SOLD properties as comparables.
+ * Zillow only for now; Redfin, Realtor, MLS, county are commented out.
+ *
  * @param {Object} subjectProperty - The subject property object
  * @param {Object} searchParams - Search parameters
  * @param {boolean} isExpansion - Internal flag to prevent recursive loops (default: false)
@@ -249,14 +246,14 @@ export const prepareCompSearch = (subjectProperty, areaType) => {
 export const findComparableProperties = async (subjectProperty, searchParams, isExpansion = false) => {
   const { latitude, longitude, radius, timeWindowMonths, propertyType, maxRadius, preferredMonths, maxMonths } = searchParams;
   const comps = [];
-  // Priority order: Zillow > Redfin > Realtor
-  // MLS and County commented out - not configured in env
+  // Zillow Sold actor first (dedicated sold comps), then Zillow URL scraper; other platforms commented out
   const sources = [
-    // { name: 'mls', scraper: scrapeMLSProperties }, // Commented out - not configured
+    { name: 'zillow-sold', scraper: scrapeZillowSoldProperties },
     { name: 'zillow', scraper: scrapeZillowProperties },
-    { name: 'redfin', scraper: scrapeRedfinProperties },
-    { name: 'realtor', scraper: scrapeRealtorProperties },
-    // { name: 'county', scraper: scrapeCountyProperties }, // Commented out - not configured
+    // { name: 'redfin', scraper: scrapeRedfinProperties },
+    // { name: 'realtor', scraper: scrapeRealtorProperties },
+    // { name: 'mls', scraper: scrapeMLSProperties },
+    // { name: 'county', scraper: scrapeCountyProperties },
   ];
 
   console.log('Finding SOLD comparable properties for subject property...');
@@ -284,6 +281,14 @@ export const findComparableProperties = async (subjectProperty, searchParams, is
       // IMPORTANT: Search for SOLD properties only (for comps analysis)
       // Include address from subject property for better search results
       // Also include city, state, postalCode if available from property data
+      // Use subject details for comp filters (doc: Beds ±1, Baths ±1, SqFt ±20%, price range)
+      // Support both DB names (beds, baths, squareFootage) and URL-scraped names (bedrooms, bathrooms, livingArea)
+      const subjectBeds = subjectProperty.beds ?? subjectProperty.bedrooms;
+      const subjectBaths = subjectProperty.baths ?? subjectProperty.bathrooms;
+      const subjectSqft = subjectProperty.squareFootage ?? subjectProperty.livingArea;
+      const subjectPrice = subjectProperty.estimatedValue ?? subjectProperty.zestimate ?? subjectProperty.price ?? 0;
+      const priceMargin = subjectPrice > 0 ? Math.round(subjectPrice * 0.2) : 0;
+
       const compSearchParams = {
         address: subjectProperty.formattedAddress || subjectProperty.address,
         city: subjectProperty.city || subjectProperty.addressComponents?.city,
@@ -295,6 +300,13 @@ export const findComparableProperties = async (subjectProperty, searchParams, is
         propertyType,
         soldWithinMonths: currentTimeWindow,
         isSold: true, // Always search for SOLD properties as comparables
+        minBeds: subjectBeds != null && subjectBeds >= 1 ? subjectBeds - 1 : 0,
+        maxBeds: subjectBeds != null ? subjectBeds + 1 : 0,
+        minBaths: subjectBaths != null && subjectBaths >= 1 ? subjectBaths - 1 : 0,
+        minSqft: subjectSqft != null && subjectSqft > 0 ? Math.round(subjectSqft * 0.8) : undefined,
+        maxSqft: subjectSqft != null && subjectSqft > 0 ? Math.round(subjectSqft * 1.2) : undefined,
+        minPrice: subjectPrice > 0 ? subjectPrice - priceMargin : undefined,
+        maxPrice: subjectPrice > 0 ? subjectPrice + priceMargin : undefined,
       };
       
       console.log(`🔍 Comp search params for ${source} (priority ${i + 1}/${sources.length}):`, {
@@ -390,6 +402,17 @@ export const findComparableProperties = async (subjectProperty, searchParams, is
           
           console.log(`  ✅ Found SOLD property: ${normalized.address} - Sale: $${normalized.salePrice || normalized.price || 'N/A'} on ${normalized.saleDate || 'N/A'}`);
 
+          // Ensure latitude/longitude for DB (required by Comparable model)
+          const compLat = normalized.latitude ?? rawData.location?.latitude ?? rawData.latitude;
+          const compLng = normalized.longitude ?? rawData.location?.longitude ?? rawData.longitude;
+          const hasValidCoords = typeof compLat === 'number' && !Number.isNaN(compLat) && typeof compLng === 'number' && !Number.isNaN(compLng);
+          if (!hasValidCoords) {
+            console.warn(`  ⚠️ Skipping comp (missing lat/lng): ${normalized.address}`);
+            continue;
+          }
+          normalized.latitude = compLat;
+          normalized.longitude = compLng;
+
           const distance = calculateDistance(
             latitude,
             longitude,
@@ -397,52 +420,59 @@ export const findComparableProperties = async (subjectProperty, searchParams, is
             normalized.longitude
           );
 
-          // Fetch full property details using property detail actor if we have a URL or ZPID
-          let fullCompDetails = null;
-          const compPropertyUrl = normalized.propertyUrl || normalized.zillowUrl || normalized.url;
-          const compZpid = normalized.zpid || normalized.sourceId;
-          
-          if (compPropertyUrl || compZpid) {
-            try {
-              console.log(`  🔍 Fetching full details for comp: ${normalized.address}`);
-              const { fetchZillowPropertyDetailsByUrl } = await import('../services/apifyService.js');
-              
-              // Build property URL if we have ZPID but no URL
-              let detailUrl = compPropertyUrl;
-              if (!detailUrl && compZpid) {
-                detailUrl = `https://www.zillow.com/homedetails/${compZpid}_zpid/`;
-              }
-              
-              if (detailUrl) {
-                const detailResult = await fetchZillowPropertyDetailsByUrl(detailUrl);
-                
-                if (detailResult && detailResult.property) {
-                  fullCompDetails = detailResult.property;
-                  
-                  // Merge full details into normalized property
-                  // Prioritize full details over search result data
-                  if (detailResult.images && detailResult.images.length > 0) {
-                    normalized.images = detailResult.images;
-                    console.log(`  ✅ Fetched ${detailResult.images.length} images from property detail page`);
-                  }
-                  
-                  // Update other fields from full details if missing
-                  if (!normalized.beds && fullCompDetails.beds) normalized.beds = fullCompDetails.beds;
-                  if (!normalized.baths && fullCompDetails.baths) normalized.baths = fullCompDetails.baths;
-                  if (!normalized.squareFootage && fullCompDetails.squareFootage) normalized.squareFootage = fullCompDetails.squareFootage;
-                  if (!normalized.lotSize && fullCompDetails.lotSize) normalized.lotSize = fullCompDetails.lotSize;
-                  if (!normalized.yearBuilt && fullCompDetails.yearBuilt) normalized.yearBuilt = fullCompDetails.yearBuilt;
-                  if (!normalized.propertyType && fullCompDetails.propertyType) normalized.propertyType = fullCompDetails.propertyType;
-                  
-                  console.log(`  ✅ Successfully fetched full details for comp: ${normalized.address}`);
-                } else {
-                  console.warn(`  ⚠️ Could not fetch full details for comp: ${normalized.address}`);
+          // Only show comps within the configured radius (document: Urban 0.25–0.5, Suburban 0.5–1.0, Rural 1–2 mi)
+          if (distance > currentRadius) {
+            console.log(`  ⏭️ Skipping comp outside radius: ${normalized.address} (${distance.toFixed(2)} mi > ${currentRadius} mi)`);
+            continue;
+          }
+
+          // Fetch full property details by URL only when comps did NOT come from Zillow Sold actor
+          // (Zillow Sold actor already returns full details: address, beds, baths, sqft, price, photos, etc.)
+          const skipDetailFetch = source === 'zillow-sold';
+          if (!skipDetailFetch) {
+            let fullCompDetails = null;
+            const compPropertyUrl = normalized.propertyUrl || normalized.zillowUrl || normalized.url;
+            const compZpid = normalized.zpid || normalized.sourceId;
+
+            if (compPropertyUrl || compZpid) {
+              try {
+                console.log(`  🔍 Fetching full details for comp: ${normalized.address}`);
+                const { fetchZillowPropertyDetailsByUrl } = await import('../services/apifyService.js');
+
+                let detailUrl = compPropertyUrl;
+                if (!detailUrl && compZpid) {
+                  detailUrl = `https://www.zillow.com/homedetails/${compZpid}_zpid/`;
                 }
+
+                if (detailUrl) {
+                  const detailResult = await fetchZillowPropertyDetailsByUrl(detailUrl);
+
+                  if (detailResult && detailResult.property) {
+                    fullCompDetails = detailResult.property;
+
+                    if (detailResult.images && detailResult.images.length > 0) {
+                      normalized.images = detailResult.images;
+                      console.log(`  ✅ Fetched ${detailResult.images.length} images from property detail page`);
+                    }
+
+                    if (!normalized.beds && fullCompDetails.beds) normalized.beds = fullCompDetails.beds;
+                    if (!normalized.baths && fullCompDetails.baths) normalized.baths = fullCompDetails.baths;
+                    if (!normalized.squareFootage && fullCompDetails.squareFootage) normalized.squareFootage = fullCompDetails.squareFootage;
+                    if (!normalized.lotSize && fullCompDetails.lotSize) normalized.lotSize = fullCompDetails.lotSize;
+                    if (!normalized.yearBuilt && fullCompDetails.yearBuilt) normalized.yearBuilt = fullCompDetails.yearBuilt;
+                    if (!normalized.propertyType && fullCompDetails.propertyType) normalized.propertyType = fullCompDetails.propertyType;
+
+                    console.log(`  ✅ Successfully fetched full details for comp: ${normalized.address}`);
+                  } else {
+                    console.warn(`  ⚠️ Could not fetch full details for comp: ${normalized.address}`);
+                  }
+                }
+              } catch (detailError) {
+                console.warn(`  ⚠️ Error fetching full details for comp ${normalized.address}:`, detailError.message);
               }
-            } catch (detailError) {
-              console.warn(`  ⚠️ Error fetching full details for comp ${normalized.address}:`, detailError.message);
-              // Continue with search result data if detail fetch fails
             }
+          } else {
+            console.log(`  ⏭️ Skipping detail-by-URL fetch for comp (source is zillow-sold; already have full details)`);
           }
 
           // SKIP image analysis when finding comps - will run after user selects comps
@@ -526,14 +556,30 @@ export const findComparableProperties = async (subjectProperty, searchParams, is
       }
 
       try {
+        const subjectBeds = subjectProperty.beds ?? subjectProperty.bedrooms;
+        const subjectBaths = subjectProperty.baths ?? subjectProperty.bathrooms;
+        const subjectSqft = subjectProperty.squareFootage ?? subjectProperty.livingArea;
+        const subjectPrice = subjectProperty.estimatedValue ?? subjectProperty.zestimate ?? subjectProperty.price ?? 0;
+        const priceMargin = subjectPrice > 0 ? Math.round(subjectPrice * 0.2) : 0;
+
         const compSearchParams = {
           address: subjectProperty.formattedAddress || subjectProperty.address,
+          city: subjectProperty.city || subjectProperty.addressComponents?.city,
+          state: subjectProperty.state || subjectProperty.addressComponents?.state,
+          postalCode: subjectProperty.postalCode || subjectProperty.zipCode || subjectProperty.addressComponents?.zipCode,
           latitude,
           longitude,
           radiusMiles: currentRadius,
           propertyType,
           soldWithinMonths: currentTimeWindow,
           isSold: true,
+          minBeds: subjectBeds != null && subjectBeds >= 1 ? subjectBeds - 1 : 0,
+          maxBeds: subjectBeds != null ? subjectBeds + 1 : 0,
+          minBaths: subjectBaths != null && subjectBaths >= 1 ? subjectBaths - 1 : 0,
+          minSqft: subjectSqft != null && subjectSqft > 0 ? Math.round(subjectSqft * 0.8) : undefined,
+          maxSqft: subjectSqft != null && subjectSqft > 0 ? Math.round(subjectSqft * 1.2) : undefined,
+          minPrice: subjectPrice > 0 ? subjectPrice - priceMargin : undefined,
+          maxPrice: subjectPrice > 0 ? subjectPrice + priceMargin : undefined,
         };
 
         console.log(`Expansion search: ${source} with radius ${currentRadius}mi, window ${currentTimeWindow} months`);
@@ -564,8 +610,16 @@ export const findComparableProperties = async (subjectProperty, searchParams, is
               normalized.salePrice = normalized.price;
             }
 
+            const compLat = normalized.latitude ?? rawData.location?.latitude ?? rawData.latitude;
+            const compLng = normalized.longitude ?? rawData.location?.longitude ?? rawData.longitude;
+            const hasValidCoords = typeof compLat === 'number' && !Number.isNaN(compLat) && typeof compLng === 'number' && !Number.isNaN(compLng);
+            if (!hasValidCoords) continue;
+            normalized.latitude = compLat;
+            normalized.longitude = compLng;
+
             const distance = calculateDistance(latitude, longitude, normalized.latitude, normalized.longitude);
-            
+            if (distance > currentRadius) continue;
+
             const existingAddress = comps.find(c => 
               c.formattedAddress?.toLowerCase() === normalized.formattedAddress?.toLowerCase()
             );
@@ -709,7 +763,7 @@ const meetsAttributeMatchingCriteria = (subjectProperty, comp, matchingCriteria)
  * Align room types for comp-to-subject photo comparison
  * Matches images by room type (Kitchen vs Kitchen, Bathroom vs Bathroom, etc.)
  */
-const alignRoomTypesForComparison = (subjectImageAnalyses, compImageAnalyses) => {
+export const alignRoomTypesForComparison = (subjectImageAnalyses, compImageAnalyses) => {
   const roomTypeMap = {
     'kitchen': 'kitchen',
     'bathroom': 'bathroom',
@@ -897,6 +951,40 @@ export const scoreComparables = (subjectProperty, comps, matchingCriteria) => {
 };
 
 /**
+ * Get the best available sale/listing price from a comp (saved salePrice or from rawData).
+ * Exported so the controller can patch comps before ARV when DB salePrice was missing.
+ */
+export function getCompSalePrice(comp) {
+  if (comp.salePrice != null && comp.salePrice > 0) return comp.salePrice;
+  // rawData may be a Mongoose subdocument – get plain object if needed
+  let raw = comp.rawData;
+  if (raw && typeof raw.toObject === 'function') raw = raw.toObject();
+  if (!raw || typeof raw !== 'object') return null;
+  // Some actors wrap the payload (e.g. { property: { price, ... } })
+  const unwrap = (r) => r?.property && typeof r.property === 'object' ? r.property : r?.data && typeof r.data === 'object' ? r.data : r;
+  const top = unwrap(raw);
+  const extract = (r) => {
+    if (!r) return null;
+    if (r.price != null && typeof r.price === 'object' && r.price.value != null) return parseFloat(r.price.value);
+    if (r.hdpView != null && r.hdpView.price != null) return parseFloat(r.hdpView.price);
+    if (r.salePrice != null) {
+      if (typeof r.salePrice === 'object' && r.salePrice.value != null) return parseFloat(r.salePrice.value);
+      return parseFloat(r.salePrice);
+    }
+    if (r.lastSoldPrice != null) return parseFloat(r.lastSoldPrice);
+    if (r.soldPrice != null) return parseFloat(r.soldPrice);
+    if (r.closingPrice != null) return parseFloat(r.closingPrice);
+    if (r.price != null) {
+      if (typeof r.price === 'object' && r.price.amount != null) return parseFloat(r.price.amount);
+      return parseFloat(r.price);
+    }
+    if (r.listPrice != null) return parseFloat(r.listPrice);
+    return null;
+  };
+  return extract(top) ?? extract(raw);
+}
+
+/**
  * PHASE 5: ARV Calculation
  */
 export const calculateARV = (subjectProperty, topComps) => {
@@ -910,7 +998,8 @@ export const calculateARV = (subjectProperty, topComps) => {
   const adjustedComps = topComps.map((comp) => {
     const compSqft = comp.squareFootage || 1;
     const adjustmentFactor = subjectSqft > 0 ? subjectSqft / compSqft : 1;
-    let adjustedPrice = comp.salePrice ? comp.salePrice * adjustmentFactor : null;
+    const salePrice = getCompSalePrice(comp);
+    let adjustedPrice = salePrice && salePrice > 0 ? salePrice * adjustmentFactor : null;
     
     // Apply condition adjustment from room-type comparison (enhanced)
     // Use the pre-calculated adjustmentPercent if available (from room-type comparison)
@@ -951,32 +1040,24 @@ export const calculateARV = (subjectProperty, topComps) => {
   const medianPrice = prices.sort((a, b) => a - b)[Math.floor(prices.length / 2)];
   const priceRange = medianPrice * 0.2; // ±20%
 
+  // Filter by outlier (±20% of median); for user-selected comps we still use compScore in weighting, not as a hard filter
   const filteredComps = adjustedComps.filter((comp) => {
     if (!comp.adjustedPrice) return false;
-    if (comp.compScore < 60) return false;
     return (
       comp.adjustedPrice >= medianPrice - priceRange &&
       comp.adjustedPrice <= medianPrice + priceRange
     );
   });
 
-  if (filteredComps.length === 0) {
-    // Fallback: use all comps if filtering removes everything
-    return calculateAverageARV(adjustedComps);
-  }
+  const compsForARV = filteredComps.length > 0 ? filteredComps : adjustedComps;
 
-  // 5.3 Calculate ARV (weighted by comp score)
-  // Use all provided comps (should be 3-5 user-selected comps)
-  // Validate that we have 3-5 comps
-  if (filteredComps.length < 3) {
-    console.warn(`Only ${filteredComps.length} comps available after filtering. ARV calculation may be less accurate.`);
+  // 5.3 ARV = weighted by comp score (per document: distance, recency, sqft, beds/baths, year built, condition from images)
+  // When compScore is missing/0 we use weight 1 so ARV is still calculated
+  let arv = calculateWeightedARV(compsForARV);
+  if (arv == null || arv <= 0) {
+    arv = calculateAverageARV(compsForARV);
   }
-  if (filteredComps.length > 5) {
-    console.warn(`${filteredComps.length} comps provided. Using all for ARV calculation.`);
-  }
-  
-  // Use all filtered comps (user should have selected 3-5)
-  return calculateWeightedARV(filteredComps);
+  return arv;
 };
 
 const calculateAverageARV = (comps) => {
@@ -990,10 +1071,11 @@ const calculateWeightedARV = (comps) => {
   let totalWeight = 0;
 
   for (const comp of comps) {
-    if (comp.adjustedPrice && comp.compScore) {
-      totalWeightedPrice += comp.adjustedPrice * comp.compScore;
-      totalWeight += comp.compScore;
-    }
+    if (comp.adjustedPrice == null || comp.adjustedPrice <= 0) continue;
+    // Weight by comp score per document; when compScore is missing/0 (e.g. not persisted), use 1 so we still compute ARV
+    const weight = (comp.compScore != null && comp.compScore > 0) ? comp.compScore : 1;
+    totalWeightedPrice += comp.adjustedPrice * weight;
+    totalWeight += weight;
   }
 
   return totalWeight > 0 ? totalWeightedPrice / totalWeight : null;

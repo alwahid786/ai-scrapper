@@ -361,35 +361,16 @@ export const aggregateImageAnalyses = (analyses) => {
       : 0;
 
   // Determine condition category based on scores and damage
-  const determineConditionCategory = (overallScore, damageRisk, renovationScore, estimatedRepairs = 0, arv = 0) => {
-    // If high damage risk, likely heavy repairs
-    if (damageRiskScore > 60) {
-      return 'heavy-repairs';
-    }
-    
-    // If low condition score (below 4 on 1-10 scale), likely needs work
-    if (overallConditionScore < 4) {
-      return 'heavy-repairs';
-    }
-    
-    // If repair estimate is high relative to ARV
-    if (arv > 0) {
+  const determineConditionCategory = (overallScore, damageRisk, _renovationScore, estimatedRepairs = 0, arv = 0) => {
+    if (damageRisk > 60) return 'heavy-repairs';
+    if (overallScore < 4) return 'heavy-repairs';
+    if (arv > 0 && estimatedRepairs > 0) {
       const repairPercent = (estimatedRepairs / arv) * 100;
       if (repairPercent >= 25) return 'heavy-repairs';
       if (repairPercent >= 10) return 'medium-repairs';
     }
-    
-    // If moderate condition and some damage
-    if (overallConditionScore < 6 && damageRiskScore > 30) {
-      return 'medium-repairs';
-    }
-    
-    // If good condition and low damage
-    if (overallConditionScore >= 6 && damageRiskScore < 30) {
-      return 'light-repairs';
-    }
-    
-    // Default to medium
+    if (overallScore < 6 && damageRisk > 30) return 'medium-repairs';
+    if (overallScore >= 6 && damageRisk < 30) return 'light-repairs';
     return 'medium-repairs';
   };
 
