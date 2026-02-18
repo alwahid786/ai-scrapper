@@ -93,13 +93,21 @@ export const normalizeImageInputs = (images = []) => {
 /**
  * Pre-process a single image: resize, fix orientation, enhance, compress
  */
+// Headers that help when fetching from listing sites (Zillow, etc.)
+const IMAGE_FETCH_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+};
+
 export const preprocessImage = async (imageUrl) => {
   try {
-    // Fetch image
+    // Fetch image (use browser-like headers so some sites don't block server requests)
     const imageResponse = await axios.get(imageUrl, {
       responseType: 'arraybuffer',
       timeout: 30000,
       maxContentLength: 10 * 1024 * 1024, // 10MB max
+      headers: IMAGE_FETCH_HEADERS,
+      validateStatus: (status) => status >= 200 && status < 400,
     });
 
     let imageBuffer = Buffer.from(imageResponse.data);
@@ -209,11 +217,13 @@ export const preprocessImage = async (imageUrl) => {
     };
   } catch (error) {
     console.warn(`Failed to preprocess image ${imageUrl}:`, error.message);
-    // Return original if preprocessing fails
+    // Retry with browser-like headers (some sites block default axios)
     try {
       const imageResponse = await axios.get(imageUrl, {
         responseType: 'arraybuffer',
         timeout: 30000,
+        headers: IMAGE_FETCH_HEADERS,
+        validateStatus: (status) => status >= 200 && status < 400,
       });
       return {
         buffer: Buffer.from(imageResponse.data),

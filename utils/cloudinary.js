@@ -37,7 +37,8 @@ export const uploadOnCloudinary = async (image, subFolder) => {
     return result;
   } catch (error) {
     console.error('Error occurred while uploading file on Cloudinary', error);
-    return null;
+    // Re-throw so the API can return a meaningful message to the client
+    throw new Error(error.message || 'Cloudinary upload failed');
   }
 };
 

@@ -28,11 +28,21 @@ const propertyAnalysisSchema = new mongoose.Schema(
     
     // MAO Calculation
     mao: Number,
-    estimatedRepairs: Number,
+    estimatedRepairs: Number, // final value used for MAO (max of user + AI when available)
+    userEstimatedRepairs: Number, // user-entered repair total from form
+    aiEstimatedRepairs: Number, // Gemini-derived repair: SOP $/sqft from condition + roof + HVAC + 10%
+    aiRepairCostPerSqft: Number, // $/sqft used for AI estimate (SOP level from Gemini condition)
+    aiRepairBreakdown: { // SOP breakdown: baseRehab, roofCost, hvacCost, bufferPercent
+      baseRehab: Number,
+      roofCost: Number,
+      hvacCost: Number,
+      bufferPercent: Number,
+      totalBeforeBuffer: Number,
+    },
     holdingCost: Number,
     closingCost: Number,
     wholesaleFee: Number,
-    maoRule: { type: String, enum: ['65%', '70%', '75%', 'custom'], default: '70%' },
+    maoRule: { type: String, enum: ['sop', '65%', '70%', '75%', 'custom'], default: 'sop' },
     suggestedOffer: Number,
     
     // Deal Score

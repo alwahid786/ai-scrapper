@@ -13,11 +13,152 @@ import {
 import { analyzePropertyImages, aggregateImageAnalyses } from './geminiService.js';
 import { normalizeImageInputs } from '../utils/imagePreprocessing.js';
 
+// --- Asset Hunters SOP Constants (Underwriting) ---
+const SOP = {
+  /** Comp search: half-mile default, expand to 1 mi in low-confidence mode */
+  RADIUS_DEFAULT_MI: 0.5,
+  RADIUS_MAX_MI: 1.0,
+  /** Prefer 6 months sold, extend to 12 only if needed */
+  PREFERRED_MONTHS: 6,
+  MAX_MONTHS: 12,
+  /** Square footage: within ±300 SF of subject (SOP 3.1) */
+  SQFT_MAX_DIFF: 300,
+  /** Year built: within ±15 years (SOP 3.1) */
+  YEAR_BUILT_TOLERANCE: 15,
+  /** Exclude comps with lot size > subject + 20,000 sqft (oversized lot) */
+  LOT_OVERSIZED_THRESHOLD_SQFT: 20000,
+  /** ARV weighting: Distance 30%, Recency 30%, Similarity 30%, Condition 10% */
+  ARV_WEIGHT_DISTANCE: 0.30,
+  ARV_WEIGHT_RECENCY: 0.30,
+  ARV_WEIGHT_SIMILARITY: 0.30,
+  ARV_WEIGHT_CONDITION: 0.10,
+  /** Dollar adjustments per SOP Step 5 */
+  ADJUSTMENT_PER_BED_BATH: 10000,
+  ADJUSTMENT_ONE_VS_TWO_BATH: 15000,
+  ADJUSTMENT_PER_100_SQFT: 10000,
+  ADJUSTMENT_PER_10K_LOT_SQFT: 10000,
+  ADJUSTMENT_GARAGE: 10000,
+  ADJUSTMENT_POOL_MIN: 10000,
+  ADJUSTMENT_POOL_MAX: 25000,
+  CONDITION_PARTIALLY_UPDATED: 5000,
+  CONDITION_OUTDATED: 15000,
+  /** ARV ceiling: cannot exceed highest comp sale + $10,000 */
+  ARV_CEILING_BUFFER: 10000,
+  /** Minimum comp score to include in ARV (automation doc: remove comps with score < 60) */
+  MIN_COMP_SCORE_FOR_ARV: 60,
+  /** Round ARV down to nearest $5,000 */
+  ARV_ROUND_TO: 5000,
+  /** Rehab $/SF by level (SOP Step 7) */
+  REHAB_LIGHT_PER_SF: 15,
+  REHAB_MEDIUM_LOW_PER_SF: 20,
+  REHAB_MEDIUM_HIGH_PER_SF: 25,
+  REHAB_HEAVY_LOW_PER_SF: 30,
+  REHAB_HEAVY_HIGH_PER_SF: 35,
+  REHAB_FULL_GUT_PER_SF: 40,
+  ROOF_COST_PER_SQFT: 8,
+  ROOF_TWO_STORY_MULTIPLIER: 1.5,
+  HVAC_ONE_UNIT: 7500,
+  HVAC_TWO_UNITS: 15000,
+  HVAC_DUCTWORK: 7000,
+  HVAC_LARGE_HOME_SQFT: 2300,
+  REHAB_MISC_BUFFER_PERCENT: 0.10,
+  /** MAO: target buyer ROI 7.5%, minimum $20K spread */
+  TARGET_BUYER_ROI: 0.075,
+  MIN_SPREAD: 20000,
+  /** Fix & Flip sheet: All-in Acq = MAO + transactional lender fee + title. Spread = Buyer Price - All-in Acq. */
+  MAO_TRANSACTIONAL_LENDER_PERCENT: 0.01,  // 1% of MAO
+  MAO_TITLE_PERCENT: 0.02,                 // 2% of MAO (title cc's)
+};
+
+/**
+ * SOP: Square footage within ±300 SF of subject. Returns max allowed difference in SF.
+ * Also used to derive tolerance ratio for backward compatibility (300/subjectSqft).
+ */
+const getSqftToleranceSOP = (subjectSqft) => {
+  if (!subjectSqft || subjectSqft <= 0) return { maxDiff: SOP.SQFT_MAX_DIFF, tolerance: 0.2 };
+  const maxDiff = SOP.SQFT_MAX_DIFF;
+  const tolerance = maxDiff / subjectSqft; // e.g. 300/2600 ≈ 0.115
+  return { maxDiff, tolerance: Math.min(tolerance, 0.3) };
+};
+
 const getSqftTolerance = (subjectSqft) => {
-  if (!subjectSqft || subjectSqft <= 0) return 0.2;
-  if (subjectSqft < 800) return 0.1;
-  if (subjectSqft < 1200) return 0.15;
-  return 0.2;
+  const { tolerance } = getSqftToleranceSOP(subjectSqft);
+  return tolerance;
+};
+
+/**
+ * SOP Step 7: Rehab by level ($/SF) + roof + HVAC + 10% buffer.
+ * Light $15/SF, Medium $20–25/SF, Heavy $30–35/SF, Full gut $40/SF.
+ * Roof: 2-story = (SF/2)*1.5*$8, 1-story = SF*$8. HVAC: >2300 SF = $15K (2 units), else $7.5K; no ductwork +$7K.
+ * If roof/AC age unknown or >10 years, budget replacement. Add 10% miscellaneous buffer.
+ * Uses Gemini conditionCategory/damageRiskScore from aggregatedImageScores to pick $/sqft per SOP.
+ */
+export const estimateRepairsSOPWithBreakdown = (subjectProperty, aggregatedImageScores = null) => {
+  const sqft = subjectProperty.squareFootage || subjectProperty.livingArea || 0;
+  if (!sqft || sqft <= 0) return null;
+
+  const conditionCategory = aggregatedImageScores?.conditionCategory || 'medium-repairs';
+  const damageRiskScore = aggregatedImageScores?.damageRiskScore || 0;
+  // SOP Step 7: Light $15/SF, Medium $20–$25/SF, Heavy $30–35/SF, Full gut $40/SF only for full-gut/major repairs.
+  // Do not bump heavy to $40 based on damage risk; SOP says Full Gut = "Fire damage, extensive repairs, full system replacements".
+  let costPerSf = SOP.REHAB_MEDIUM_HIGH_PER_SF; // default medium $25 (SOP example: 2,632 SF × $25 = $65,800)
+  if (conditionCategory === 'light-repairs') costPerSf = SOP.REHAB_LIGHT_PER_SF;
+  else if (conditionCategory === 'medium-repairs') costPerSf = SOP.REHAB_MEDIUM_HIGH_PER_SF; // $25/SF per SOP
+  else if (conditionCategory === 'heavy-repairs') {
+    // SOP: "Average rehab for an outdated property will be $30" — use $32.5 (mid of $30–$35); high damage risk use upper end.
+    costPerSf = damageRiskScore >= 70 ? SOP.REHAB_HEAVY_HIGH_PER_SF : (SOP.REHAB_HEAVY_LOW_PER_SF + SOP.REHAB_HEAVY_HIGH_PER_SF) / 2;
+  } else if (conditionCategory === 'full-gut' || conditionCategory === 'full-gut-repairs') {
+    costPerSf = SOP.REHAB_FULL_GUT_PER_SF; // $40/SF only for full gut / major repairs per SOP
+  }
+
+  let baseRehab = sqft * costPerSf;
+  let roofCost = 0;
+  let hvacCost = 0;
+
+  const stories = subjectProperty.stories ?? subjectProperty.storyCount ?? 1;
+  const roofAge = subjectProperty.roofAge ?? subjectProperty.roofAgeYears ?? null;
+  const acAge = subjectProperty.acAge ?? subjectProperty.hvacAge ?? subjectProperty.acAgeYears ?? null;
+  const roofUnknownOrOld = roofAge == null || roofAge > 10;
+  const acUnknownOrOld = acAge == null || acAge > 10;
+
+  if (roofUnknownOrOld) {
+    if (stories >= 2) {
+      roofCost = (sqft / 2) * SOP.ROOF_TWO_STORY_MULTIPLIER * SOP.ROOF_COST_PER_SQFT;
+    } else {
+      roofCost = sqft * SOP.ROOF_COST_PER_SQFT;
+    }
+    baseRehab += roofCost;
+  }
+
+  if (acUnknownOrOld) {
+    if (sqft >= SOP.HVAC_LARGE_HOME_SQFT) hvacCost = SOP.HVAC_TWO_UNITS;
+    else hvacCost = SOP.HVAC_ONE_UNIT;
+    if (subjectProperty.noCentralAC || subjectProperty.noDuctwork) hvacCost += SOP.HVAC_DUCTWORK;
+    baseRehab += hvacCost;
+  }
+
+  const bufferPercent = SOP.REHAB_MISC_BUFFER_PERCENT * 100;
+  const withBuffer = baseRehab * (1 + SOP.REHAB_MISC_BUFFER_PERCENT);
+  const total = Math.round(withBuffer);
+
+  return {
+    total,
+    conditionCategory,
+    costPerSf,
+    breakdown: {
+      baseRehab: Math.round(sqft * costPerSf),
+      roofCost: Math.round(roofCost),
+      hvacCost,
+      bufferPercent,
+      totalBeforeBuffer: Math.round(baseRehab),
+    },
+  };
+};
+
+/** Returns total only (backward compatible). Uses Gemini condition → SOP $/sqft + roof + HVAC + 10%. */
+export const estimateRepairsSOP = (subjectProperty, aggregatedImageScores = null) => {
+  const result = estimateRepairsSOPWithBreakdown(subjectProperty, aggregatedImageScores);
+  return result ? result.total : null;
 };
 
 export const estimateRepairsFromCondition = (arv, aggregatedImageScores) => {
@@ -106,17 +247,19 @@ export const prepareSubjectProperty = async (address, images = [], skipImageAnal
           property.estimatedValue = normalizedData.estimatedValue || normalizedData.zestimate;
         }
         
-        // Get images from the property (combine with provided images, remove duplicates)
+        // Get images from the listing (combine with provided images for storage only)
         if (normalizedData.images && normalizedData.images.length > 0) {
           const allImages = [...imageUrls, ...normalizedData.images];
-          property.images = [...new Set(allImages)]; // Remove duplicates
-          const appendedMetas = normalizedData.images.map((url, idx) => ({
-            url,
-            photoType: null,
-            captureOrder: imageMetas.length + idx,
-          }));
-          imageMetas = [...imageMetas, ...appendedMetas];
-          imageUrls = property.images; // Update images array for analysis
+          property.images = [...new Set(allImages)];
+          // Only use scraped images for analysis when caller did not provide any (SOP: analyze subject using user-uploaded photos)
+          if (imageUrls.length === 0) {
+            imageUrls = property.images;
+            imageMetas = property.images.map((url, idx) => ({
+              url,
+              photoType: null,
+              captureOrder: idx,
+            }));
+          }
         }
         
         await property.save();
@@ -200,38 +343,76 @@ const categorizePropertyType = (propertyType) => {
 
 /**
  * PHASE 2: Comp Search Preparation
+ * SOP: Half-mile radius (0.5 mi), expand to 1.0 mi if <2 strong comps. Prefer 6 months sold, extend to 12.
+ * Sqft ±300 SF, Year built ±15 years. Exclude oversized lots (> subject + 20,000 sqft).
  */
 export const prepareCompSearch = (subjectProperty, areaType) => {
-  // 2.1 Define Comp Search Radius
-  const defaultRadius = getDefaultRadius(areaType);
-  const minRadius = areaType === 'urban' ? 0.25 : areaType === 'suburban' ? 0.5 : 1.0;
-  // Max radius allows for expansion: urban can expand to 0.75, suburban to 1.5, rural to 2.5
-  const maxRadius = areaType === 'urban' ? 0.75 : areaType === 'suburban' ? 1.5 : 2.5;
+  // SOP 2.1: Half-mile default; max 1.0 mi in low-confidence mode (Privy-style)
+  const defaultRadius = SOP.RADIUS_DEFAULT_MI; // 0.5 mi
+  const minRadius = SOP.RADIUS_DEFAULT_MI;
+  const maxRadius = SOP.RADIUS_MAX_MI; // 1.0 mi
+  // Legacy fallback if not using SOP (e.g. rural): keep area-based expansion
+  const maxRadiusLegacy = areaType === 'rural' ? 1.5 : maxRadius;
 
-  // 2.2 Define Time Window - prefer sold within 12 months (doc: expand to 12 months if necessary)
-  const preferredMonths = 12;
-  const maxMonths = 12;
+  // SOP 2.2: Prefer 6 months, extend to 12 only if needed
+  const preferredMonths = SOP.PREFERRED_MONTHS; // 6
+  const maxMonths = SOP.MAX_MONTHS; // 12
 
-  // 2.3 Attribute Matching Requirements
-  const sqftTolerance = getSqftTolerance(subjectProperty.squareFootage);
+  // SOP 2.3: ±300 SF, ±15 years, oversized lot exclusion; SOP 3.1: stories ideally same (1-story vs 1-story, 2-story vs 2-story)
+  const { maxDiff: sqftMaxDiff, tolerance: sqftTolerance } = getSqftToleranceSOP(subjectProperty.squareFootage || 0);
   const matchingCriteria = {
-    propertyType: true, // Must match
+    propertyType: true,
     bedrooms: { tolerance: 1 },
     bathrooms: { tolerance: 1 },
-    squareFootage: { tolerance: sqftTolerance }, // Smaller homes get tighter ranges
-    lotSize: { tolerance: 0.5 }, // ±50% (only if lots matter)
-    yearBuilt: { tolerance: 10 }, // ±10 years (optional for older areas)
-    areaType: areaType, // Pass area type for conditional matching
+    squareFootage: { tolerance: sqftTolerance, maxDiff: sqftMaxDiff }, // SOP: ±300 SF
+    lotSize: { tolerance: 0.5, oversizedThreshold: SOP.LOT_OVERSIZED_THRESHOLD_SQFT }, // Exclude comp lot > subject + 20k
+    yearBuilt: { tolerance: SOP.YEAR_BUILT_TOLERANCE }, // SOP: ±15 years
+    stories: { tolerance: 1 }, // SOP: ideally same story count (1-story vs 1-story, 2-story vs 2-story); allow ±1
+    areaType: areaType,
   };
 
   return {
     radius: defaultRadius,
     minRadius,
-    maxRadius,
+    maxRadius: maxRadiusLegacy,
     preferredMonths,
     maxMonths,
     matchingCriteria,
   };
+};
+
+/**
+ * Returns true if the given normalized comp is the subject property (same listing).
+ * Used to exclude the subject from the comparables list.
+ */
+const isSubjectProperty = (subjectProperty, normalized) => {
+  if (!subjectProperty || !normalized) return false;
+  const subAddr = (subjectProperty.formattedAddress || subjectProperty.address || '').toString().trim().toLowerCase().replace(/\s+/g, ' ');
+  const compAddr = (normalized.formattedAddress || normalized.address || '').toString().trim().toLowerCase().replace(/\s+/g, ' ');
+  if (subAddr && compAddr && subAddr === compAddr) return true;
+  const subId = (subjectProperty.sourceId || subjectProperty.zpid || '').toString().trim();
+  const compId = (normalized.sourceId || normalized.zpid || '').toString().trim();
+  if (subId && compId && subId === compId) return true;
+  const subLat = subjectProperty.latitude ?? subjectProperty.lat;
+  const subLng = subjectProperty.longitude ?? subjectProperty.lng ?? subjectProperty.lon;
+  const compLat = normalized.latitude;
+  const compLng = normalized.longitude;
+  if (typeof subLat === 'number' && typeof subLng === 'number' && typeof compLat === 'number' && typeof compLng === 'number') {
+    const dist = calculateDistance(subLat, subLng, compLat, compLng);
+    if (dist < 0.001) return true;
+  }
+  return false;
+};
+
+/**
+ * SOP: Exclude comps "across major roads or highways" (different value profile).
+ * Returns true only if we determine the comp is across a major road from the subject.
+ * No geographic/road data in codebase; override or integrate with map/road API or shapefile when available.
+ * Same-subdivision preference (SOP low-confidence) would also require subdivision data source.
+ */
+const isAcrossMajorRoad = (subjectProperty, comp) => {
+  // Placeholder: no road network data. When available, e.g. check same side of highway or road class.
+  return false;
 };
 
 /**
@@ -262,32 +443,32 @@ export const findComparableProperties = async (subjectProperty, searchParams, is
     console.log('⚠️ This is an expansion search - will not expand further to prevent loops');
   }
 
-  let currentTimeWindow = timeWindowMonths || preferredMonths || 6;
+  // SOP: Prefer 6 months sold; expand to 12 only if <3 comps
+  let currentTimeWindow = timeWindowMonths ?? preferredMonths ?? SOP.PREFERRED_MONTHS;
   let currentRadius = radius;
+  const sqftMaxDiff = searchParams.matchingCriteria?.squareFootage?.maxDiff ?? SOP.SQFT_MAX_DIFF;
   let primarySourceConfig = null;
   let foundHigherPrioritySource = false;
 
   // PHASE 3.1: Check sources in priority order
-  // According to document: "If a higher-source dataset is available, lower sources are ignored"
-  // This means we check all sources in priority order, and use the FIRST source that returns results
+  // Zillow only; Redfin, Realtor, MLS, county commented out.
   for (let i = 0; i < sources.length; i++) {
     const sourceConfig = sources[i];
     const compsBefore = comps.length;
     const source = sourceConfig.name;
     const scraper = sourceConfig.scraper;
-    
+
     try {
       let results;
-      // IMPORTANT: Search for SOLD properties only (for comps analysis)
-      // Include address from subject property for better search results
-      // Also include city, state, postalCode if available from property data
-      // Use subject details for comp filters (doc: Beds ±1, Baths ±1, SqFt ±20%, price range)
-      // Support both DB names (beds, baths, squareFootage) and URL-scraped names (bedrooms, bathrooms, livingArea)
       const subjectBeds = subjectProperty.beds ?? subjectProperty.bedrooms;
       const subjectBaths = subjectProperty.baths ?? subjectProperty.bathrooms;
       const subjectSqft = subjectProperty.squareFootage ?? subjectProperty.livingArea;
       const subjectPrice = subjectProperty.estimatedValue ?? subjectProperty.zestimate ?? subjectProperty.price ?? 0;
       const priceMargin = subjectPrice > 0 ? Math.round(subjectPrice * 0.2) : 0;
+
+      // SOP: Sqft within ±300 SF of subject (min/max in SF)
+      const minSqft = subjectSqft != null && subjectSqft > 0 ? Math.max(0, Math.round(subjectSqft - sqftMaxDiff)) : undefined;
+      const maxSqft = subjectSqft != null && subjectSqft > 0 ? Math.round(subjectSqft + sqftMaxDiff) : undefined;
 
       const compSearchParams = {
         address: subjectProperty.formattedAddress || subjectProperty.address,
@@ -299,12 +480,12 @@ export const findComparableProperties = async (subjectProperty, searchParams, is
         radiusMiles: currentRadius,
         propertyType,
         soldWithinMonths: currentTimeWindow,
-        isSold: true, // Always search for SOLD properties as comparables
+        isSold: true,
         minBeds: subjectBeds != null && subjectBeds >= 1 ? subjectBeds - 1 : 0,
         maxBeds: subjectBeds != null ? subjectBeds + 1 : 0,
         minBaths: subjectBaths != null && subjectBaths >= 1 ? subjectBaths - 1 : 0,
-        minSqft: subjectSqft != null && subjectSqft > 0 ? Math.round(subjectSqft * 0.8) : undefined,
-        maxSqft: subjectSqft != null && subjectSqft > 0 ? Math.round(subjectSqft * 1.2) : undefined,
+        minSqft,
+        maxSqft,
         minPrice: subjectPrice > 0 ? subjectPrice - priceMargin : undefined,
         maxPrice: subjectPrice > 0 ? subjectPrice + priceMargin : undefined,
       };
@@ -426,6 +607,26 @@ export const findComparableProperties = async (subjectProperty, searchParams, is
             continue;
           }
 
+          // SOP: Comps must be in same ZIP (immediate neighborhood). Apply to both initial and expanded search.
+          const subjectZip = (subjectProperty.postalCode || subjectProperty.zipCode || subjectProperty.addressComponents?.zipCode || '').toString().trim();
+          const compZipRaw = normalized.postalCode || normalized.zipCode || normalized.zipcode || (normalized.addressComponents && (normalized.addressComponents.zipCode || normalized.addressComponents.postalCode)) || '';
+          const compZip = compZipRaw ? compZipRaw.toString().trim() : (normalized.formattedAddress || normalized.address || '').match(/\b(\d{5})(-\d{4})?$/)?.[1] || '';
+          if (subjectZip && compZip) {
+            const subjectZip5 = subjectZip.replace(/-?\d{4}$/, '').slice(0, 5);
+            const compZip5 = compZip.replace(/-?\d{4}$/, '').slice(0, 5);
+            if (subjectZip5 !== compZip5) {
+              console.log(`  ⏭️ Skipping comp in different ZIP: ${normalized.address} (comp ZIP ${compZip5} ≠ subject ${subjectZip5})`);
+              continue;
+            }
+          }
+
+          // SOP: Exclude properties across major roads/highways (different value profile). No geographic data available;
+          // plug in isAcrossMajorRoad when road/same-side data exists (e.g. map API or shapefile).
+          if (isAcrossMajorRoad(subjectProperty, normalized)) {
+            console.log(`  ⏭️ Skipping comp across major road: ${normalized.address}`);
+            continue;
+          }
+
           // Fetch full property details by URL only when comps did NOT come from Zillow Sold actor
           // (Zillow Sold actor already returns full details: address, beds, baths, sqft, price, photos, etc.)
           const skipDetailFetch = source === 'zillow-sold';
@@ -487,6 +688,12 @@ export const findComparableProperties = async (subjectProperty, searchParams, is
           // No room-type comparison at this stage (will be done after comp selection)
           let roomTypeComparisons = [];
 
+          // Skip if this comp is the subject property (same listing)
+          if (isSubjectProperty(subjectProperty, normalized)) {
+            console.log(`  ⏭️ Skipping subject property from comparables: ${normalized.address || normalized.formattedAddress}`);
+            continue;
+          }
+
           // Ensure all required fields are present
           const compData = {
             ...normalized,
@@ -533,11 +740,24 @@ export const findComparableProperties = async (subjectProperty, searchParams, is
 
   console.log(`Total SOLD comparables found: ${comps.length}`);
 
+  // SOP Low Confidence: "strong comp" = within 0.5 mi AND sold within 6 months. Expand when <2 strong comps or <3 total.
+  const countStrongComps = (compList) => {
+    const sixMonthsAgo = new Date();
+    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+    return compList.filter((c) => {
+      const distOk = (c.distanceMiles ?? 999) <= SOP.RADIUS_DEFAULT_MI;
+      const saleDate = c.saleDate ? new Date(c.saleDate) : null;
+      const recencyOk = saleDate && saleDate >= sixMonthsAgo;
+      return distOk && recencyOk;
+    }).length;
+  };
+  const strongCount = countStrongComps(comps);
+  const needsExpansion = strongCount < 2 || comps.length < 3;
+
   // IMPORTANT: Only expand if this is NOT already an expansion search
-  // This prevents infinite loops and multiple actor runs
-  // Try to expand if we have less than 3 comps, but still return whatever we found
-  if (comps.length < 3 && !isExpansion && primarySourceConfig) {
-    console.log(`⚠️ Only found ${comps.length} comps. Attempting to expand search to find more...`);
+  // SOP: Expand when <2 strong comps within 0.5 mi (or <3 comps total)
+  if (needsExpansion && !isExpansion && primarySourceConfig) {
+    console.log(`⚠️ Low confidence: ${strongCount} strong comps (within 0.5 mi, ≤6 mo), ${comps.length} total. Attempting to expand search...`);
     const source = primarySourceConfig.name;
     const scraper = primarySourceConfig.scraper;
     const effectiveMaxRadius = maxRadius || 2.5;
@@ -562,6 +782,9 @@ export const findComparableProperties = async (subjectProperty, searchParams, is
         const subjectPrice = subjectProperty.estimatedValue ?? subjectProperty.zestimate ?? subjectProperty.price ?? 0;
         const priceMargin = subjectPrice > 0 ? Math.round(subjectPrice * 0.2) : 0;
 
+        const sqftMaxDiffExp = searchParams.matchingCriteria?.squareFootage?.maxDiff ?? SOP.SQFT_MAX_DIFF;
+        const minSqftExp = subjectSqft != null && subjectSqft > 0 ? Math.max(0, Math.round(subjectSqft - sqftMaxDiffExp)) : undefined;
+        const maxSqftExp = subjectSqft != null && subjectSqft > 0 ? Math.round(subjectSqft + sqftMaxDiffExp) : undefined;
         const compSearchParams = {
           address: subjectProperty.formattedAddress || subjectProperty.address,
           city: subjectProperty.city || subjectProperty.addressComponents?.city,
@@ -576,8 +799,8 @@ export const findComparableProperties = async (subjectProperty, searchParams, is
           minBeds: subjectBeds != null && subjectBeds >= 1 ? subjectBeds - 1 : 0,
           maxBeds: subjectBeds != null ? subjectBeds + 1 : 0,
           minBaths: subjectBaths != null && subjectBaths >= 1 ? subjectBaths - 1 : 0,
-          minSqft: subjectSqft != null && subjectSqft > 0 ? Math.round(subjectSqft * 0.8) : undefined,
-          maxSqft: subjectSqft != null && subjectSqft > 0 ? Math.round(subjectSqft * 1.2) : undefined,
+          minSqft: minSqftExp,
+          maxSqft: maxSqftExp,
           minPrice: subjectPrice > 0 ? subjectPrice - priceMargin : undefined,
           maxPrice: subjectPrice > 0 ? subjectPrice + priceMargin : undefined,
         };
@@ -620,10 +843,28 @@ export const findComparableProperties = async (subjectProperty, searchParams, is
             const distance = calculateDistance(latitude, longitude, normalized.latitude, normalized.longitude);
             if (distance > currentRadius) continue;
 
-            const existingAddress = comps.find(c => 
+            // Skip if this comp is the subject property (same listing)
+            if (isSubjectProperty(subjectProperty, normalized)) {
+              console.log(`  ⏭️ [Expansion] Skipping subject property from comparables: ${normalized.address || normalized.formattedAddress}`);
+              continue;
+            }
+
+            // SOP Low Confidence: when expanded (up to 1 mi), comps must be in same ZIP as subject
+            const subjectZip = (subjectProperty.postalCode || subjectProperty.zipCode || '').toString().trim();
+            const compZipRaw = normalized.postalCode || normalized.zipCode || normalized.zipcode || '';
+            const compZip = compZipRaw ? compZipRaw.toString().trim() : (normalized.formattedAddress || normalized.address || '').match(/\b(\d{5})(-\d{4})?$/)?.[1] || '';
+            if (subjectZip && compZip) {
+              const subjectZip5 = subjectZip.replace(/-?\d{4}$/, '').slice(0, 5);
+              const compZip5 = compZip.replace(/-?\d{4}$/, '').slice(0, 5);
+              if (subjectZip5 !== compZip5) {
+                continue; // Skip comp in different ZIP
+              }
+            }
+
+            const existingAddress = comps.find(c =>
               c.formattedAddress?.toLowerCase() === normalized.formattedAddress?.toLowerCase()
             );
-            
+
             if (!existingAddress) {
               comps.push({
                 ...normalized,
@@ -642,7 +883,7 @@ export const findComparableProperties = async (subjectProperty, searchParams, is
       } catch (error) {
         console.error(`Error in expansion search from ${source}:`, error.message);
       }
-      
+
       console.log(`After expansion step: ${comps.length} total comps`);
     }
 
@@ -707,55 +948,59 @@ const meetsAttributeMatchingCriteria = (subjectProperty, comp, matchingCriteria)
     }
   }
   
-  // Square footage: ±20% tolerance
-  if (matchingCriteria.squareFootage && matchingCriteria.squareFootage.tolerance !== undefined) {
+  // Square footage: SOP ±300 SF (use maxDiff if provided, else tolerance ratio)
+  if (matchingCriteria.squareFootage) {
     const subjectSqft = subjectProperty.squareFootage || 0;
     const compSqft = comp.squareFootage || 0;
     if (subjectSqft > 0 && compSqft > 0) {
-      const sqftDiff = Math.abs(compSqft - subjectSqft) / subjectSqft;
-      if (sqftDiff > matchingCriteria.squareFootage.tolerance) {
-        return false;
+      const diff = Math.abs(compSqft - subjectSqft);
+      if (matchingCriteria.squareFootage.maxDiff != null) {
+        if (diff > matchingCriteria.squareFootage.maxDiff) return false;
+      } else if (matchingCriteria.squareFootage.tolerance != null) {
+        if (diff / subjectSqft > matchingCriteria.squareFootage.tolerance) return false;
       }
     }
   }
-  
-  // Lot size: ±50% tolerance (only if lots matter in the area)
-  // In urban areas, lot size typically matters less; in suburban/rural, it matters more
-  if (matchingCriteria.lotSize && matchingCriteria.lotSize.tolerance !== undefined) {
-    const areaType = matchingCriteria.areaType || 'suburban'; // Default to suburban
-    const lotsMatter = areaType !== 'urban'; // Urban areas: lots don't matter much
-    
-    if (lotsMatter) {
-      const subjectLot = subjectProperty.lotSize || 0;
-      const compLot = comp.lotSize || 0;
-      if (subjectLot > 0 && compLot > 0) {
+
+  // Lot size: SOP exclude oversized lots (comp lot > subject + 20,000 sqft)
+  if (matchingCriteria.lotSize) {
+    const subjectLot = Number(subjectProperty.lotSize) || 0;
+    const compLot = Number(comp.lotSize) || 0;
+    const oversizedThreshold = matchingCriteria.lotSize.oversizedThreshold ?? SOP.LOT_OVERSIZED_THRESHOLD_SQFT;
+    if (subjectLot > 0 && compLot > 0 && compLot > subjectLot + oversizedThreshold) {
+      return false; // Luxury/oversized lot - exclude per SOP
+    }
+    // Optional: ±50% tolerance when no oversized threshold (legacy)
+    if (matchingCriteria.lotSize.tolerance != null && matchingCriteria.lotSize.tolerance < 1 && !matchingCriteria.lotSize.oversizedThreshold) {
+      const areaType = matchingCriteria.areaType || 'suburban';
+      if (areaType !== 'urban' && subjectLot > 0 && compLot > 0) {
         const lotDiff = Math.abs(compLot - subjectLot) / subjectLot;
-        if (lotDiff > matchingCriteria.lotSize.tolerance) {
-          return false;
-        }
+        if (lotDiff > matchingCriteria.lotSize.tolerance) return false;
       }
     }
-    // If lots don't matter (urban), skip this check
   }
-  
-  // Year built: ±10 years tolerance (optional for older areas)
-  // For properties built before 1980, year built is less relevant
+
+  // Year built: SOP ±15 years
   if (matchingCriteria.yearBuilt && matchingCriteria.yearBuilt.tolerance !== undefined) {
     const subjectYear = subjectProperty.yearBuilt || 0;
     const compYear = comp.yearBuilt || 0;
-    
-    // Skip year built check for older properties (built before 1980)
-    const isOlderArea = subjectYear > 0 && subjectYear < 1980;
-    
-    if (!isOlderArea && subjectYear > 0 && compYear > 0) {
+    const tolerance = matchingCriteria.yearBuilt.tolerance; // SOP: 15
+    if (subjectYear > 0 && compYear > 0) {
       const yearDiff = Math.abs(compYear - subjectYear);
-      if (yearDiff > matchingCriteria.yearBuilt.tolerance) {
-        return false;
-      }
+      if (yearDiff > tolerance) return false;
     }
-    // If older area, skip this check (optional as per document)
   }
-  
+
+  // Stories: SOP ideally same (1-story vs 1-story, 2-story vs 2-story); allow ±1 when both have data
+  if (matchingCriteria.stories && matchingCriteria.stories.tolerance !== undefined) {
+    const subjectStories = subjectProperty.stories ?? subjectProperty.storyCount ?? null;
+    const compStories = comp.stories ?? comp.storyCount ?? null;
+    if (subjectStories != null && compStories != null) {
+      const tolerance = matchingCriteria.stories.tolerance; // 1
+      if (Math.abs(compStories - subjectStories) > tolerance) return false;
+    }
+  }
+
   return true; // Passes all criteria
 };
 
@@ -879,60 +1124,69 @@ export const scoreComparables = (subjectProperty, comps, matchingCriteria) => {
     }));
   }
 
+  // SOP Step 6: Comp Score = Distance 30% + Recency 30% + Similarity 30% + Condition 10%
+  // Distance: 0–0.25 mi = strongest (100), 0.25–0.5 = strong (70), 0.5–1.0 = weak (40)
+  // Recency: <3 mo = strongest (100), 3–6 = strong (70), 6–12 = weak (40)
+  // Similarity: Beds/Baths, SqFt (±300 SF), Year built (±15 yr), Story count (SOP: ideally same)
   const scoredComps = filteredComps.map((comp) => {
-    // Distance Score (25%)
-    const distances = comps.map((c) => c.distanceMiles || 0).filter((d) => d > 0);
-    const maxDistance = distances.length > 0 ? Math.max(...distances) : 1;
-    const distanceScore = maxDistance > 0 ? (1 - (comp.distanceMiles || 0) / maxDistance) * 100 : 100;
+    const distMi = comp.distanceMiles || 0;
+    let distanceScore = 40;
+    if (distMi <= 0.25) distanceScore = 100;
+    else if (distMi <= 0.5) distanceScore = 70;
+    else if (distMi <= 1.0) distanceScore = 40;
+    else distanceScore = Math.max(0, 40 - (distMi - 1) * 20);
 
-    // Recency Score (20%)
     const saleDate = comp.saleDate ? new Date(comp.saleDate) : null;
     const monthsAgo = saleDate
       ? (Date.now() - saleDate.getTime()) / (1000 * 60 * 60 * 24 * 30)
       : 12;
-    const recencyScore = Math.max(0, 100 - monthsAgo * 10);
+    let recencyScore = 40;
+    if (monthsAgo < 3) recencyScore = 100;
+    else if (monthsAgo < 6) recencyScore = 70;
+    else if (monthsAgo <= 12) recencyScore = 40;
+    else recencyScore = Math.max(0, 40 - (monthsAgo - 12) * 5);
 
-    // Square Footage Score (20%)
-    const subjectSqft = subjectProperty.squareFootage || 0;
+    // Similarity sub-scores (SOP: beds/baths, sqft, year built, story count)
+    const subjectSqft = subjectProperty.squareFootage || subjectProperty.livingArea || 0;
     const compSqft = comp.squareFootage || 0;
-    const sqftDiff = subjectSqft > 0 ? Math.abs(compSqft - subjectSqft) / subjectSqft : 1;
-    const sqftScore = Math.max(0, 100 - sqftDiff * 500);
+    const sqftDiffAbs = subjectSqft > 0 && compSqft > 0 ? Math.abs(compSqft - subjectSqft) : 300;
+    const sqftScore = subjectSqft > 0 && compSqft > 0
+      ? Math.max(0, 100 - (Math.min(sqftDiffAbs, SOP.SQFT_MAX_DIFF) / SOP.SQFT_MAX_DIFF) * 100)
+      : 50;
 
-    // Beds/Baths Similarity Score (15%)
-    const bedDiff = Math.abs((comp.beds || 0) - (subjectProperty.beds || 0));
-    const bathDiff = Math.abs((comp.baths || 0) - (subjectProperty.baths || 0));
+    const bedDiff = Math.abs((comp.beds || 0) - (subjectProperty.beds || subjectProperty.bedrooms || 0));
+    const bathDiff = Math.abs((comp.baths || 0) - (subjectProperty.baths || subjectProperty.bathrooms || 0));
     const bedBathScore = Math.max(0, 100 - (bedDiff + bathDiff) * 25);
 
-    // Year Built Similarity Score (10%)
-    const subjectYear = subjectProperty.yearBuilt || 2000;
-    const compYear = comp.yearBuilt || 2000;
-    const yearDiff = Math.abs(compYear - subjectYear);
-    const yearBuiltScore = Math.max(0, 100 - yearDiff * 2);
+    const subjectYear = subjectProperty.yearBuilt || 0;
+    const compYear = comp.yearBuilt || 0;
+    const yearDiff = subjectYear > 0 && compYear > 0 ? Math.abs(compYear - subjectYear) : SOP.YEAR_BUILT_TOLERANCE;
+    const yearBuiltScore = subjectYear > 0 && compYear > 0
+      ? Math.max(0, 100 - (Math.min(yearDiff, SOP.YEAR_BUILT_TOLERANCE) / SOP.YEAR_BUILT_TOLERANCE) * 100)
+      : 50;
 
-    // Condition Score (10%)
-    // Condition rating is 1-5, convert to 0-100 score
-    // If comp has image analysis, use confidence-weighted condition rating
-    let conditionScore = comp.conditionRating ? (comp.conditionRating / 5) * 100 : 50;
-    
-    // Enhance condition score with image confidence if available
-    // Comps with high-confidence image analysis get more weight
-    if (comp.images && comp.images.length > 0 && comp.conditionRating) {
-      // If we have images, assume moderate confidence (could be enhanced with actual confidence data)
-      const imageConfidence = 70; // Default confidence when images are present
-      const confidenceWeight = imageConfidence / 100;
-      // Boost condition score slightly if we have image-based assessment
-      conditionScore = conditionScore * (0.8 + 0.2 * confidenceWeight);
-      conditionScore = Math.min(100, conditionScore); // Cap at 100
+    const subjectStories = subjectProperty.stories ?? subjectProperty.storyCount ?? null;
+    const compStories = comp.stories ?? comp.storyCount ?? null;
+    let storyScore = 100;
+    if (subjectStories != null && compStories != null) {
+      const storyDiff = Math.abs(compStories - subjectStories);
+      storyScore = storyDiff === 0 ? 100 : (storyDiff === 1 ? 50 : 0);
     }
 
-    // Calculate total Comp Score
+    const similarityScore = (sqftScore + bedBathScore + yearBuiltScore + storyScore) / 4;
+
+    let conditionScore = comp.conditionRating ? (comp.conditionRating / 5) * 100 : 50;
+    if (comp.images && comp.images.length > 0 && comp.conditionRating) {
+      const imageConfidence = 70;
+      conditionScore = conditionScore * (0.8 + 0.2 * (imageConfidence / 100));
+      conditionScore = Math.min(100, conditionScore);
+    }
+
     const compScore =
-      distanceScore * 0.25 +
-      recencyScore * 0.2 +
-      sqftScore * 0.2 +
-      bedBathScore * 0.15 +
-      yearBuiltScore * 0.1 +
-      conditionScore * 0.1;
+      distanceScore * SOP.ARV_WEIGHT_DISTANCE +
+      recencyScore * SOP.ARV_WEIGHT_RECENCY +
+      similarityScore * SOP.ARV_WEIGHT_SIMILARITY +
+      conditionScore * SOP.ARV_WEIGHT_CONDITION;
 
     return {
       ...comp,
@@ -942,6 +1196,7 @@ export const scoreComparables = (subjectProperty, comps, matchingCriteria) => {
       sqftScore: Math.round(sqftScore * 100) / 100,
       bedBathScore: Math.round(bedBathScore * 100) / 100,
       yearBuiltScore: Math.round(yearBuiltScore * 100) / 100,
+      storyScore: Math.round(storyScore * 100) / 100,
       conditionScore: Math.round(conditionScore * 100) / 100,
     };
   });
@@ -951,18 +1206,15 @@ export const scoreComparables = (subjectProperty, comps, matchingCriteria) => {
 };
 
 /**
- * Get the best available sale/listing price from a comp (saved salePrice or from rawData).
- * Exported so the controller can patch comps before ARV when DB salePrice was missing.
+ * Get the best available sale/listing price from a comp.
+ * Prefers rawData (source/scraped price) when present so ARV is not lowered by stale DB salePrice.
+ * Falls back to comp.salePrice when rawData has no price.
  */
 export function getCompSalePrice(comp) {
-  if (comp.salePrice != null && comp.salePrice > 0) return comp.salePrice;
   // rawData may be a Mongoose subdocument – get plain object if needed
   let raw = comp.rawData;
   if (raw && typeof raw.toObject === 'function') raw = raw.toObject();
-  if (!raw || typeof raw !== 'object') return null;
-  // Some actors wrap the payload (e.g. { property: { price, ... } })
   const unwrap = (r) => r?.property && typeof r.property === 'object' ? r.property : r?.data && typeof r.data === 'object' ? r.data : r;
-  const top = unwrap(raw);
   const extract = (r) => {
     if (!r) return null;
     if (r.price != null && typeof r.price === 'object' && r.price.value != null) return parseFloat(r.price.value);
@@ -981,83 +1233,129 @@ export function getCompSalePrice(comp) {
     if (r.listPrice != null) return parseFloat(r.listPrice);
     return null;
   };
-  return extract(top) ?? extract(raw);
+  const fromRaw = raw && typeof raw === 'object' ? (extract(unwrap(raw)) ?? extract(raw)) : null;
+  if (fromRaw != null && fromRaw > 0) return fromRaw;
+  if (comp.salePrice != null && comp.salePrice > 0) return comp.salePrice;
+  return null;
+}
+
+/**
+ * SOP Step 5: Dollar adjustments to comp sale price to reflect subject property.
+ * Bed/Bath ±$10K each (or $15K for 1↔2 bath), Garage ±$10K, ±$10K per 100 SF, ±$10K per 10k lot, Pool ±$10–25K.
+ * Condition: Partially updated +$5K, Outdated +$15K (bring comp to "updated" baseline).
+ */
+function getSOPAdjustedCompPrice(subjectProperty, comp) {
+  const salePrice = getCompSalePrice(comp);
+  if (salePrice == null || salePrice <= 0) return null;
+
+  const subjectSqft = subjectProperty.squareFootage || 0;
+  const compSqft = comp.squareFootage || 0;
+  const subjectBeds = subjectProperty.beds ?? subjectProperty.bedrooms ?? 0;
+  const compBeds = comp.beds ?? 0;
+  const subjectBaths = subjectProperty.baths ?? subjectProperty.bathrooms ?? 0;
+  const compBaths = comp.baths ?? 0;
+  const subjectLot = Number(subjectProperty.lotSize) || 0;
+  const compLot = Number(comp.lotSize) || 0;
+  const subjectGarage = subjectProperty.garageSpaces ?? subjectProperty.garage ?? 0;
+  const compGarage = comp.garageSpaces ?? comp.garage ?? 0;
+  const compHasPool = comp.hasPool ?? comp.pool ?? (Array.isArray(comp.poolFeatures) && comp.poolFeatures.length > 0);
+  const subjectHasPool = subjectProperty.hasPool ?? subjectProperty.pool ?? false;
+
+  let adj = salePrice;
+
+  const sqftDiff = subjectSqft - compSqft;
+  adj += (sqftDiff / 100) * SOP.ADJUSTMENT_PER_100_SQFT;
+
+  const bedDiff = subjectBeds - compBeds;
+  const bathDiff = subjectBaths - compBaths;
+  const oneVsTwoBath = (subjectBaths === 1 && compBaths === 2) || (subjectBaths === 2 && compBaths === 1);
+  adj += bedDiff * SOP.ADJUSTMENT_PER_BED_BATH;
+  if (oneVsTwoBath) adj += (bathDiff > 0 ? 1 : -1) * (SOP.ADJUSTMENT_ONE_VS_TWO_BATH - SOP.ADJUSTMENT_PER_BED_BATH);
+  else adj += bathDiff * SOP.ADJUSTMENT_PER_BED_BATH;
+
+  const garageDiff = subjectGarage - compGarage;
+  if (garageDiff !== 0) adj += garageDiff * SOP.ADJUSTMENT_GARAGE;
+
+  const lotDiffSqft = subjectLot - compLot;
+  if (subjectLot > 0 || compLot > 0) adj += (lotDiffSqft / 10000) * SOP.ADJUSTMENT_PER_10K_LOT_SQFT;
+
+  if (compHasPool && !subjectHasPool) adj -= (SOP.ADJUSTMENT_POOL_MIN + SOP.ADJUSTMENT_POOL_MAX) / 2;
+  if (!compHasPool && subjectHasPool) adj += (SOP.ADJUSTMENT_POOL_MIN + SOP.ADJUSTMENT_POOL_MAX) / 2;
+
+  const conditionLabel = (comp.conditionLabel || comp.condition || '').toLowerCase();
+  const conditionCat = (comp.aggregatedImageScores?.conditionCategory || '').toLowerCase();
+  // SOP: Updated = baseline, Partially updated = +$5K, Outdated = +$15K
+  if (conditionLabel.includes('partial') || conditionLabel === 'partially updated') adj += SOP.CONDITION_PARTIALLY_UPDATED;
+  else if (conditionLabel.includes('outdated') || conditionLabel === 'fair' || conditionLabel === 'old') adj += SOP.CONDITION_OUTDATED;
+  else if (conditionCat === 'heavy-repairs') adj += SOP.CONDITION_OUTDATED; // Gemini: heavy → treat as outdated
+  else if (conditionCat === 'medium-repairs') adj += SOP.CONDITION_PARTIALLY_UPDATED; // Gemini: medium → partially updated
+
+  if (comp.conditionRating != null && comp.conditionRating < 3 && !conditionLabel && !conditionCat) adj += SOP.CONDITION_OUTDATED;
+  else if (comp.conditionRating != null && comp.conditionRating === 3 && !conditionLabel && !conditionCat) adj += SOP.CONDITION_PARTIALLY_UPDATED;
+
+  return Math.round(adj);
 }
 
 /**
  * PHASE 5: ARV Calculation
+ * SOP: Dollar adjustments per comp (Step 5), weighted average by Distance/Recency/Similarity/Condition (Step 6),
+ * ARV ceiling = max(raw comp sale price) + $10K, round down to nearest $5,000.
+ * We do NOT reduce comp value when comp is in better condition than subject — per SOP we "favor updated comps"
+ * and the adjusted price represents what the subject would sell for after repair (i.e. comparable to the comp).
  */
 export const calculateARV = (subjectProperty, topComps) => {
   if (!topComps || topComps.length === 0) {
-    return null;
+    return { arv: null, adjustedComps: [] };
   }
 
   const subjectSqft = subjectProperty.squareFootage || 0;
 
-  // 5.1 Adjust Raw Comps
+  // 5.1 Adjust Raw Comps — SOP Step 5: dollar adjustments (bed/bath/sf/lot/garage/pool/condition)
+  // Do NOT apply conditionAdjustmentPercent here: SOP says favor updated comps; subject after repair = comp level.
   const adjustedComps = topComps.map((comp) => {
-    const compSqft = comp.squareFootage || 1;
-    const adjustmentFactor = subjectSqft > 0 ? subjectSqft / compSqft : 1;
-    const salePrice = getCompSalePrice(comp);
-    let adjustedPrice = salePrice && salePrice > 0 ? salePrice * adjustmentFactor : null;
-    
-    // Apply condition adjustment from room-type comparison (enhanced)
-    // Use the pre-calculated adjustmentPercent if available (from room-type comparison)
-    // Otherwise fall back to the old calculation method
-    if (adjustedPrice) {
-      let conditionAdjustmentPercent = 0;
-      
-      if (comp.conditionAdjustmentPercent !== undefined) {
-        // Use the enhanced room-type comparison adjustment (already weighted by confidence)
-        conditionAdjustmentPercent = comp.conditionAdjustmentPercent;
-        // Cap at ±15% for safety (more generous than before since it's confidence-weighted)
-        conditionAdjustmentPercent = Math.max(-0.15, Math.min(0.15, conditionAdjustmentPercent));
-      } else if (comp.conditionAdjustment !== undefined && comp.conditionAdjustment !== 0) {
-        // Fallback to old method if new method not available
-        conditionAdjustmentPercent = Math.max(-0.10, Math.min(0.10, comp.conditionAdjustment * 0.02));
-      }
-      
-      if (conditionAdjustmentPercent !== 0) {
-        // Positive adjustment = comp is better = adjust comp value DOWN (subject needs work)
-        // Negative adjustment = subject is better = adjust comp value UP (subject is nicer)
-        adjustedPrice = adjustedPrice * (1 - conditionAdjustmentPercent);
-        console.log(`Applied condition adjustment: ${(conditionAdjustmentPercent * 100).toFixed(2)}% to comp ${comp.address || comp.formattedAddress}`);
-      }
+    let adjustedPrice = getSOPAdjustedCompPrice(subjectProperty, comp);
+
+    if (adjustedPrice == null || adjustedPrice <= 0) {
+      const compSqft = comp.squareFootage || 1;
+      const adjustmentFactor = subjectSqft > 0 ? subjectSqft / compSqft : 1;
+      const salePrice = getCompSalePrice(comp);
+      adjustedPrice = salePrice && salePrice > 0 ? salePrice * adjustmentFactor : null;
     }
 
     return {
       ...comp,
-      adjustedPrice,
+      adjustedPrice: adjustedPrice != null ? Math.round(adjustedPrice) : null,
     };
   });
 
-  // 5.2 Remove Outliers
-  const prices = adjustedComps
-    .map((c) => c.adjustedPrice)
-    .filter((p) => p != null);
-  if (prices.length === 0) return null;
+  const prices = adjustedComps.map((c) => c.adjustedPrice).filter((p) => p != null);
+  if (prices.length === 0) return { arv: null, adjustedComps };
 
-  const medianPrice = prices.sort((a, b) => a - b)[Math.floor(prices.length / 2)];
-  const priceRange = medianPrice * 0.2; // ±20%
-
-  // Filter by outlier (±20% of median); for user-selected comps we still use compScore in weighting, not as a hard filter
-  const filteredComps = adjustedComps.filter((comp) => {
-    if (!comp.adjustedPrice) return false;
-    return (
-      comp.adjustedPrice >= medianPrice - priceRange &&
-      comp.adjustedPrice <= medianPrice + priceRange
-    );
+  // SOP: Remove comps with score < 60 before ARV (automation doc)
+  const scoreFiltered = adjustedComps.filter((c) => {
+    if (c.adjustedPrice == null || c.adjustedPrice <= 0) return false;
+    const score = c.compScore != null ? c.compScore : 100;
+    return score >= SOP.MIN_COMP_SCORE_FOR_ARV;
   });
-
-  const compsForARV = filteredComps.length > 0 ? filteredComps : adjustedComps;
-
-  // 5.3 ARV = weighted by comp score (per document: distance, recency, sqft, beds/baths, year built, condition from images)
-  // When compScore is missing/0 we use weight 1 so ARV is still calculated
-  let arv = calculateWeightedARV(compsForARV);
-  if (arv == null || arv <= 0) {
-    arv = calculateAverageARV(compsForARV);
+  const compsForARV = scoreFiltered.length > 0 ? scoreFiltered : adjustedComps;
+  if (scoreFiltered.length === 0 && adjustedComps.length > 0) {
+    console.warn(`⚠️ No comps with score >= ${SOP.MIN_COMP_SCORE_FOR_ARV}; using all comps for ARV (per automation fallback).`);
   }
-  return arv;
+
+  // SOP Step 6: Weighted ARV (Distance 30%, Recency 30%, Similarity 30%, Condition 10%) — no median filter
+  let arv = calculateWeightedARV(compsForARV);
+  if (arv == null || arv <= 0) arv = calculateAverageARV(compsForARV);
+  if (arv == null || arv <= 0) return { arv: null, adjustedComps };
+
+  // SOP: ARV cannot exceed highest verified comp SALE PRICE (raw) + $10,000
+  const rawSalePrices = compsForARV.map((c) => getCompSalePrice(c)).filter((p) => p != null && p > 0);
+  const maxRawSalePrice = rawSalePrices.length > 0 ? Math.max(...rawSalePrices) : null;
+  const ceiling = maxRawSalePrice != null ? maxRawSalePrice + SOP.ARV_CEILING_BUFFER : null;
+  if (ceiling != null && arv > ceiling) arv = ceiling;
+
+  // SOP: Round ARV down to nearest $5,000
+  arv = Math.floor(arv / SOP.ARV_ROUND_TO) * SOP.ARV_ROUND_TO;
+  return { arv, adjustedComps };
 };
 
 const calculateAverageARV = (comps) => {
@@ -1082,7 +1380,77 @@ const calculateWeightedARV = (comps) => {
 };
 
 /**
+ * SOP Step 8 / Fix & Flip Offer Sheet: Calculate MAO (Maximum Allowable Offer).
+ *
+ * SOP: "Input ARV and Rehab in the sheet. Tweak Purchase Price until ROI = 7.5%. Then in Acquisition
+ * Section, input the potential offer (MAO); the sheet adds transactional lender fees and title costs,
+ * and ensures a $20,000 spread between the buyer's purchase price and our total acquisition cost."
+ *
+ * Sheet layout (matches Google Sheet):
+ *   Main Numbers: ARV, Dispo Price (buyer purchase @ 7.5% ROI), Repairs Cost
+ *   MAO section: MAO (our offer) → + 1% Transactional Lender → + 2% Title cc's → All in Acq cost
+ *   Spread = Dispo Price − All in Acq cost = $20,000
+ *
+ * Formula:
+ *   1. Buyer Purchase Price (Dispo) = (ARV − (1+7.5%)×(Rehab + buyerCosts)) / (1+7.5%)
+ *   2. All-in Acq target = Buyer Price − $20,000
+ *   3. All-in = MAO + 1%×MAO + 2%×MAO = MAO × 1.03  =>  MAO = All-in target / 1.03
+ */
+export const calculateMAOSOP = (arv, inputs) => {
+  const {
+    estimatedRepairs = 0,
+    holdingCost = 0,
+    closingCost = 0,
+    wholesaleFee = 0,
+  } = inputs;
+  if (!arv || arv <= 0) return null;
+
+  const rehab = estimatedRepairs;
+  const buyerCosts = holdingCost + closingCost;
+  const roi = SOP.TARGET_BUYER_ROI;
+  const buyerPriceAt75ROI = (arv - (1 + roi) * (rehab + buyerCosts)) / (1 + roi);
+  if (buyerPriceAt75ROI <= 0) return null;
+
+  const allInAcqTarget = buyerPriceAt75ROI - SOP.MIN_SPREAD;
+  const maoMultiplier = 1 + SOP.MAO_TRANSACTIONAL_LENDER_PERCENT + SOP.MAO_TITLE_PERCENT;
+  const baseMAOVal = allInAcqTarget / maoMultiplier;
+  const mao = Math.max(0, Math.round(baseMAOVal));
+  const transactionalLenderFee = Math.round(mao * SOP.MAO_TRANSACTIONAL_LENDER_PERCENT);
+  const titleCost = Math.round(mao * SOP.MAO_TITLE_PERCENT);
+  const allInAcqCost = mao + transactionalLenderFee + titleCost;
+  const totalFeesVal = Math.round(estimatedRepairs + holdingCost + closingCost + wholesaleFee);
+  const suggestedOffer = Math.max(0, Math.round(mao * 0.95));
+
+  return {
+    mao,
+    suggestedOffer,
+    baseMAO: mao,
+    allInAcqCost,
+    transactionalLenderFee,
+    titleCost,
+    totalFees: totalFeesVal,
+    breakdown: {
+      arv,
+      baseMAO: mao,
+      buyerPriceAt75ROI: Math.round(buyerPriceAt75ROI),
+      minSpread: SOP.MIN_SPREAD,
+      allInAcqCost,
+      transactionalLenderFee,
+      titleCost,
+      estimatedRepairs,
+      holdingCost,
+      closingCost,
+      wholesaleFee,
+      totalFees: totalFeesVal,
+      useSOP: true,
+    },
+    useSOP: true,
+  };
+};
+
+/**
  * PHASE 6: MAO Calculation
+ * When maoRule === 'sop', uses ROI-based 7.5% and $20K spread (Asset Hunters SOP). Otherwise 65%/70%/75%/custom.
  */
 export const calculateMAO = (arv, inputs) => {
   const {
@@ -1092,16 +1460,27 @@ export const calculateMAO = (arv, inputs) => {
     wholesaleFee = 0,
     maoRule = '70%',
     maoRulePercent = null,
+    useSOP = false,
   } = inputs;
 
   if (!arv) {
     return null;
   }
 
+  if (maoRule === 'sop' || useSOP) {
+    const sopResult = calculateMAOSOP(arv, {
+      estimatedRepairs,
+      holdingCost,
+      closingCost,
+      wholesaleFee,
+    });
+    if (sopResult) return sopResult;
+  }
+
   const rulePercent =
     maoRule === 'custom' && maoRulePercent
       ? maoRulePercent / 100
-      : parseFloat(maoRule.replace('%', '')) / 100;
+      : parseFloat(String(maoRule).replace('%', '')) / 100;
   const baseMAO = arv * rulePercent;
   const totalFees = estimatedRepairs + holdingCost + closingCost + wholesaleFee;
 

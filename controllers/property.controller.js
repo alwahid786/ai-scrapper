@@ -12,10 +12,57 @@ import {
 // import { enhancePropertyImages } from '../services/geminiService.js'; // Image enhancement disabled - show images as-is
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { CustomError } from '../utils/CustomError.js';
+import { uploadOnCloudinary } from '../utils/cloudinary.js';
 
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+
+/**
+ * Upload subject property images to Cloudinary; returns public URLs for use as property.images.
+ * POST /api/property/upload-images (multipart: images[])
+ */
+export const uploadPropertyImages = async (req, res) => {
+  try {
+    // Support both "images" and "images[]" (multer.fields())
+    const raw = req.files || {};
+    const files = [].concat(
+      raw.images || [],
+      raw['images[]'] || []
+    ).filter(Boolean);
+    if (!files || files.length === 0) {
+      return res.status(400).json({ success: false, error: 'No images provided', urls: [] });
+    }
+
+    const urls = [];
+    const subFolder = 'subject-property';
+
+    for (const file of files) {
+      const result = await uploadOnCloudinary({ buffer: file.buffer }, subFolder);
+      if (result && result.secure_url) {
+        urls.push(result.secure_url);
+      }
+    }
+
+    if (urls.length === 0) {
+      return res.status(500).json({
+        success: false,
+        error: 'No images could be uploaded. Check Cloudinary configuration (CLOUDINARY_* in .env).',
+        urls: [],
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Uploaded ${urls.length} image(s)`,
+      urls,
+    });
+  } catch (err) {
+    console.error('uploadPropertyImages error:', err);
+    const message = err.message || 'Upload failed';
+    return res.status(500).json({ success: false, error: message, urls: [] });
+  }
+};
 
 export const address = async (req, res) => {
   try {

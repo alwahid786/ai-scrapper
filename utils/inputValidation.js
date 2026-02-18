@@ -94,7 +94,7 @@ export const validateMaoInputs = (inputs) => {
     holdingCost: 0,
     closingCost: 0,
     wholesaleFee: 0,
-    maoRule: '70%',
+    maoRule: 'sop', // SOP: 7.5% buyer ROI + $20K spread (Asset Hunters)
     maoRulePercent: null,
   };
 
@@ -132,8 +132,8 @@ export const validateMaoInputs = (inputs) => {
     }
 
     if (inputs.maoRule !== undefined) {
-      if (!['65%', '70%', '75%', 'custom'].includes(inputs.maoRule)) {
-        throw new Error('MAO rule must be 65%, 70%, 75%, or custom');
+      if (!['65%', '70%', '75%', 'custom', 'sop'].includes(inputs.maoRule)) {
+        throw new Error('MAO rule must be 65%, 70%, 75%, custom, or sop');
       }
       validated.maoRule = inputs.maoRule;
     }

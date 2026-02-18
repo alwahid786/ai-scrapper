@@ -192,7 +192,17 @@ Be thorough and accurate. Only include fields that are visible in the image. Ret
     );
 
     const response = result.response;
-    let text = response.text();
+    let text;
+    try {
+      text = response.text();
+    } catch (textError) {
+      console.warn('Gemini response.text() failed (e.g. blocked or empty):', textError.message);
+      throw new Error('Gemini returned no text (content may be blocked or empty). Try a different image.');
+    }
+    if (!text || typeof text !== 'string' || !text.trim()) {
+      console.warn('Gemini returned empty text');
+      throw new Error('Gemini returned empty response');
+    }
 
     // Clean up the response - remove markdown code blocks if present
     text = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
@@ -220,6 +230,22 @@ Be thorough and accurate. Only include fields that are visible in the image. Ret
       console.error('JSON parse error:', parseError.message);
       console.error('Attempted to parse:', jsonMatch[0]);
       throw new Error(`Failed to parse Gemini JSON response: ${parseError.message}`);
+    }
+
+    // Normalize conditionScore to number 1-5 (Gemini may return string or omit)
+    const rawScore = analysis.conditionScore;
+    let conditionScore = typeof rawScore === 'number' && !Number.isNaN(rawScore)
+      ? Math.max(1, Math.min(5, rawScore))
+      : parseInt(rawScore, 10);
+    if (!Number.isFinite(conditionScore)) conditionScore = 3;
+    analysis.conditionScore = conditionScore;
+
+    // Normalize imageType to lowercase for consistent aggregation
+    if (analysis.imageType && typeof analysis.imageType === 'string') {
+      analysis.imageType = analysis.imageType.toLowerCase().replace(/\s+/g, '-');
+    }
+    if (!analysis.imageType || !['exterior-front', 'exterior-back', 'kitchen', 'bedroom', 'bathroom', 'living-room', 'basement', 'garage', 'backyard', 'roof', 'interior', 'uncertain'].includes(analysis.imageType)) {
+      analysis.imageType = 'uncertain';
     }
 
     return {
@@ -261,6 +287,7 @@ export const analyzePropertyImages = async (imageUrls, propertyContext = {}) => 
   }
 
   const analyses = [];
+  let failedCount = 0;
 
   for (const meta of uniqueMetas) {
     try {
@@ -274,9 +301,20 @@ export const analyzePropertyImages = async (imageUrls, propertyContext = {}) => 
       // Add delay to avoid rate limiting
       await new Promise((resolve) => setTimeout(resolve, 1000));
     } catch (error) {
+      failedCount++;
       console.error(`Failed to analyze image ${meta.url}:`, error.message);
       // Continue with other images
     }
+  }
+
+  if (analyses.length === 0 && uniqueMetas.length > 0) {
+    console.warn(
+      `⚠️ Image analysis failed for all ${uniqueMetas.length} image(s). ` +
+      'Repair and condition will use defaults (medium-repairs). ' +
+      'Check: image URLs reachable, GEMINI_API_KEY set, and network/API quota.'
+    );
+  } else if (failedCount > 0) {
+    console.warn(`⚠️ Image analysis failed for ${failedCount} of ${uniqueMetas.length} image(s). Using ${analyses.length} successful analyses.`);
   }
 
   return analyses;
@@ -294,6 +332,7 @@ export const aggregateImageAnalyses = (analyses) => {
       renovationScore: 0,
       damageRiskScore: 0,
       imageConfidence: 0,
+      conditionCategory: 'medium-repairs', // So repair $/sqft and condition always have a value
     };
   }
 
@@ -302,20 +341,23 @@ export const aggregateImageAnalyses = (analyses) => {
 
   // Weight scores by confidence - higher confidence images have more weight
   const getWeightedScore = (score, confidence) => {
-    if (!score || score === null) return null;
-    const normalizedConfidence = (confidence || 50) / 100; // Normalize to 0-1
-    const minWeight = 0.5; // Even low confidence images get some weight
+    const numScore = typeof score === 'number' && !Number.isNaN(score) ? score : parseFloat(score);
+    if (numScore == null || Number.isNaN(numScore)) return null;
+    const normalizedConfidence = (confidence == null ? 50 : Number(confidence)) / 100;
+    const minWeight = 0.5;
     const weight = minWeight + (normalizedConfidence * (1 - minWeight));
-    return { score, weight };
+    return { score: Math.max(1, Math.min(5, numScore)), weight };
   };
 
+  const normType = (t) => (t && typeof t === 'string' ? t.toLowerCase().trim() : '');
+
   const interiorScores = analyses
-    .filter((a) => interiorTypes.includes(a.imageType))
+    .filter((a) => interiorTypes.includes(normType(a.imageType)))
     .map((a) => getWeightedScore(a.conditionScore, a.confidence))
     .filter((s) => s != null && s.score != null);
   
   const exteriorScores = analyses
-    .filter((a) => exteriorTypes.includes(a.imageType))
+    .filter((a) => exteriorTypes.includes(normType(a.imageType)))
     .map((a) => getWeightedScore(a.conditionScore, a.confidence))
     .filter((s) => s != null && s.score != null);
 

@@ -12,13 +12,65 @@ import {
   validateObjectId,
 } from '../utils/inputValidation.js';
 
+/** Sanitize a single image analysis for API response (no Mongoose, no internal-only fields) */
+function sanitizeImageAnalysisForResponse(a) {
+  if (!a || typeof a !== 'object') return null;
+  return {
+    imageUrl: a.imageUrl,
+    imageType: a.imageType || 'uncertain',
+    confidence: a.confidence,
+    conditionScore: a.conditionScore,
+    conditionDetails: a.conditionDetails || null,
+    renovationIndicators: Array.isArray(a.renovationIndicators) ? a.renovationIndicators : [],
+    damageFlags: Array.isArray(a.damageFlags) ? a.damageFlags : [],
+    hasNewCabinets: a.hasNewCabinets,
+    hasStainlessAppliances: a.hasStainlessAppliances,
+    hasModernLightFixtures: a.hasModernLightFixtures,
+    hasUpdatedBathroom: a.hasUpdatedBathroom,
+    hasNewFlooring: a.hasNewFlooring,
+    hasFreshPaint: a.hasFreshPaint,
+    hasModernWindows: a.hasModernWindows,
+    hasUpgradedSiding: a.hasUpgradedSiding,
+    hasNewRoof: a.hasNewRoof,
+    hasWaterDamage: a.hasWaterDamage,
+    hasMold: a.hasMold,
+    hasCracks: a.hasCracks,
+    hasBrokenWindows: a.hasBrokenWindows,
+    hasMissingShingles: a.hasMissingShingles,
+    hasFoundationCracks: a.hasFoundationCracks,
+    hasYardNeglect: a.hasYardNeglect,
+    damageNotes: a.damageNotes || null,
+  };
+}
+
+/** Build a short subject-vs-comp summary for display (SOP: comp-to-subject photo comparison) */
+function buildSubjectVsCompSummary(subjectProperty, selectedComps) {
+  const parts = [];
+  const roomLabels = { kitchen: 'Kitchen', bathroom: 'Bathroom', bedroom: 'Bedroom', 'living-room': 'Living room', 'exterior-front': 'Exterior front', 'exterior-back': 'Exterior back', basement: 'Basement', garage: 'Garage', backyard: 'Backyard', roof: 'Roof' };
+  const subjectAgg = subjectProperty?.aggregatedImageScores;
+  for (const comp of selectedComps || []) {
+    const comparisons = comp.roomTypeComparisons || [];
+    for (const r of comparisons) {
+      if (r.conditionDifference > 0) {
+        const label = roomLabels[r.roomType] || r.roomType;
+        parts.push(`${label}: comp ${r.compCondition}/5 vs subject ${r.subjectCondition}/5`);
+      }
+    }
+  }
+  if (parts.length === 0 && subjectAgg) {
+    if ((subjectAgg.overallConditionScore ?? 5) < 5) parts.push('Subject condition below average; comps used for ARV baseline.');
+    else if ((subjectAgg.renovationScore ?? 0) < 50) parts.push('Subject has limited renovation indicators compared to comps.');
+  }
+  return parts.length > 0 ? parts.join('. ') : undefined;
+}
+
 /**
  * Run analysis on selected comp properties (3-5 comps)
  * POST /api/comps/analyze-selected
  * Body: { propertyId, selectedCompIds: [compId1, compId2, ...], maoInputs: {} }
  */
 export const analyzeSelectedComps = asyncHandler(async (req, res, next) => {
-  const { propertyId, selectedCompIds = [], maoInputs = {} } = req.body;
+  const { propertyId, selectedCompIds = [], maoInputs = {}, subjectImages } = req.body;
 
   // propertyId can be MongoDB _id or sourceId (e.g. ZPID) – must be non-empty string
   if (!propertyId || typeof propertyId !== 'string' || !propertyId.trim()) {
@@ -104,18 +156,27 @@ export const analyzeSelectedComps = asyncHandler(async (req, res, next) => {
   }
 
   const address = property.formattedAddress || property.address || property.rawAddress;
-  const propertyImages = property.images || [];
+  // Use subject images from request (user-uploaded) when provided; otherwise DB property.images (SOP: compare comps to subject using subject photos)
+  const propertyImages = (Array.isArray(subjectImages) && subjectImages.length > 0)
+    ? subjectImages
+    : (property.images || []);
 
   if (!address) {
     return next(new CustomError(400, 'Property address not found'));
   }
 
+  // Persist subject images to property when provided so DB reflects user-uploaded photos
+  if (Array.isArray(subjectImages) && subjectImages.length > 0) {
+    property.images = subjectImages;
+    await property.save().catch(() => {});
+  }
+
   try {
     // Import comps engine functions (getCompSalePrice used to patch salePrice from rawData when DB has none)
-    const { prepareSubjectProperty, calculateARV, calculateMAO, calculateDealScore, generateRecommendation, estimateRepairsFromCondition, getCompSalePrice } = await import('../services/compsEngineService.js');
+    const { prepareSubjectProperty, calculateARV, calculateMAO, calculateDealScore, generateRecommendation, estimateRepairsFromCondition, estimateRepairsSOP, estimateRepairsSOPWithBreakdown, getCompSalePrice } = await import('../services/compsEngineService.js');
     const { analyzePropertyImages, aggregateImageAnalyses } = await import('../services/geminiService.js');
 
-    // Prepare subject property WITH image analysis (skipImageAnalysis = false)
+    // Prepare subject property WITH image analysis (skipImageAnalysis = false); analyzes only subject images for comp-to-subject comparison
     console.log(`📊 Running analysis on ${selectedComps.length} selected comps for property: ${address}`);
     console.log(`🖼️ Running image analysis for subject property (${propertyImages.length} images)...`);
     const prepared = await prepareSubjectProperty(address, propertyImages, false); // skipImageAnalysis = false
@@ -147,29 +208,30 @@ export const analyzeSelectedComps = asyncHandler(async (req, res, next) => {
             comp.imageAnalyses = compImageAnalyses;
             comp.aggregatedImageScores = aggregated;
             
-            // Perform room-type alignment comparison with subject property
+            // Perform room-type alignment comparison with subject property (SOP: comp-to-subject photo comparison)
             if (subjectProperty.imageAnalyses && subjectProperty.imageAnalyses.length > 0) {
               const roomTypeComparisons = alignRoomTypesForComparison(
                 subjectProperty.imageAnalyses,
                 compImageAnalyses
               );
-              
+              comp.roomTypeComparisons = roomTypeComparisons;
+
               // Adjust comp value based on condition differences
               if (roomTypeComparisons.length > 0) {
                 let totalWeightedAdjustment = 0;
                 let totalWeight = 0;
-                
+
                 roomTypeComparisons.forEach(comparison => {
                   const weight = (comparison.confidence || 50) / 100;
                   const adjustment = comparison.adjustmentPercent || 0;
                   totalWeightedAdjustment += adjustment * weight;
                   totalWeight += weight;
                 });
-                
+
                 const avgAdjustmentPercent = totalWeight > 0 ? totalWeightedAdjustment / totalWeight : 0;
                 comp.conditionAdjustmentPercent = Math.max(-0.15, Math.min(0.15, avgAdjustmentPercent));
-                comp.conditionAdjustment = roomTypeComparisons.reduce((sum, comp) => sum + comp.conditionDifference, 0) / roomTypeComparisons.length;
-                
+                comp.conditionAdjustment = roomTypeComparisons.reduce((sum, c) => sum + c.conditionDifference, 0) / roomTypeComparisons.length;
+
                 console.log(`  ✅ Room-type comparison: ${roomTypeComparisons.length} rooms compared, avg adjustment: ${(avgAdjustmentPercent * 100).toFixed(2)}%`);
               }
             }
@@ -197,18 +259,35 @@ export const analyzeSelectedComps = asyncHandler(async (req, res, next) => {
       }
     }
 
-    // Patch salePrice from rawData when DB has none (e.g. old comps or rawData saved but salePrice wasn't)
+    // Resolve sale price from comp (rawData preferred over DB so ARV is not lowered by stale DB salePrice).
     for (const comp of selectedComps) {
       const resolved = getCompSalePrice(comp);
-      if ((comp.salePrice == null || comp.salePrice <= 0) && resolved != null && resolved > 0) {
+      if (resolved != null && resolved > 0) {
+        const prev = comp.salePrice;
         comp.salePrice = resolved;
-        await Comparable.findByIdAndUpdate(comp._id, { salePrice: resolved }).catch(() => {});
+        if (prev == null || prev <= 0 || prev !== resolved) {
+          await Comparable.findByIdAndUpdate(comp._id, { salePrice: resolved }).catch(() => {});
+        }
       }
     }
 
-    // Calculate ARV using only selected comps
+    // SOP Step 5: Subject attributes (beds, baths, sqft, lot, garage) must be set for dollar adjustments.
+    // prepareSubjectProperty may return a subject without these if the DB property was never updated from search.
+    // Merge the known subject (property from DB) into subjectProperty so ARV uses correct adjustments.
+    if (property) {
+      if (property.beds != null) subjectProperty.beds = property.beds;
+      if (property.baths != null) subjectProperty.baths = property.baths;
+      if (property.squareFootage != null) subjectProperty.squareFootage = property.squareFootage;
+      if (property.lotSize != null) subjectProperty.lotSize = property.lotSize;
+      if (property.yearBuilt != null) subjectProperty.yearBuilt = property.yearBuilt;
+      if (property.garageSpaces != null) subjectProperty.garageSpaces = property.garageSpaces;
+      if (property.garage != null) subjectProperty.garage = property.garage;
+      console.log(`📐 Subject for ARV: ${subjectProperty.beds ?? '?'} bed, ${subjectProperty.baths ?? '?'} bath, ${subjectProperty.squareFootage ?? '?'} sqft`);
+    }
+
+    // Calculate ARV using only selected comps (SOP: adjusted prices, weighted average, ceiling max comp + $10K)
     console.log(`💰 Calculating ARV from ${selectedComps.length} selected comps...`);
-    const arv = calculateARV(subjectProperty, selectedComps);
+    const { arv, adjustedComps } = calculateARV(subjectProperty, selectedComps);
 
     if (arv == null || arv <= 0) {
       const sample = selectedComps[0];
@@ -223,18 +302,119 @@ export const analyzeSelectedComps = asyncHandler(async (req, res, next) => {
       return next(new CustomError(400, 'Could not calculate ARV from selected comps. Ensure comps have valid sale prices.'));
     }
 
-    // Repair estimate: from image analysis (Gemini) or default when no subject images
-    const validatedMaoInputs = validateMaoInputs(maoInputs);
-    if (!validatedMaoInputs.estimatedRepairs || validatedMaoInputs.estimatedRepairs === 0) {
-      if (subjectAggregated) {
-        const estimated = estimateRepairsFromCondition(arv, subjectAggregated);
-        if (estimated) validatedMaoInputs.estimatedRepairs = estimated;
+    // Build response comp list from selectedComps (full DB + in-memory fields) and overlay adjustedPrice from adjustedComps.
+    // This ensures address, saleDate, salePrice, distanceMiles, compScore, dataSource are always present (from DB or rawData).
+    const adjustedById = new Map(adjustedComps.map((c) => [c._id?.toString(), c]));
+    const resolveCompAddress = (c) => {
+      if (c.address && typeof c.address === 'string') return c.address;
+      if (c.formattedAddress && typeof c.formattedAddress === 'string') return c.formattedAddress;
+      const raw = c.rawData && typeof c.rawData.toObject === 'function' ? c.rawData.toObject() : c.rawData;
+      if (raw && typeof raw === 'object') {
+        const r = raw.property && typeof raw.property === 'object' ? raw.property : raw.data && typeof raw.data === 'object' ? raw.data : raw;
+        const addr = r.address;
+        if (addr && typeof addr === 'string') return addr;
+        if (addr && typeof addr === 'object' && (addr.streetAddress || addr.street)) {
+          const parts = [addr.streetAddress || addr.street];
+          if (addr.city) parts.push(addr.city);
+          if (addr.state) parts.push(addr.state);
+          if (addr.zipcode || addr.zipCode || addr.postalCode) parts.push(addr.zipcode || addr.zipCode || addr.postalCode);
+          if (parts.length) return parts.join(', ');
+        }
+        if (r.streetAddress && r.city) return [r.streetAddress, r.city, r.state, r.zipCode || r.postalCode].filter(Boolean).join(', ');
+        if (r.fullAddress) return r.fullAddress;
+        if (r.formattedAddress) return r.formattedAddress;
       }
-      if (!validatedMaoInputs.estimatedRepairs && arv) {
-        validatedMaoInputs.estimatedRepairs = Math.round(arv * 0.12);
+      return null;
+    };
+    const compsForResponse = selectedComps.map((orig) => {
+      const plain = orig.toObject ? orig.toObject() : { ...orig };
+      const adj = adjustedById.get(orig._id?.toString());
+      const addressResolved = resolveCompAddress(plain) || plain.address || plain.formattedAddress;
+      const salePriceResolved = plain.salePrice ?? getCompSalePrice(orig);
+      return {
+        ...plain,
+        address: addressResolved || plain.address,
+        formattedAddress: plain.formattedAddress || addressResolved,
+        salePrice: salePriceResolved,
+        adjustedPrice: adj?.adjustedPrice ?? plain.adjustedPrice,
+        roomTypeComparisons: orig.roomTypeComparisons,
+        imageAnalyses: orig.imageAnalyses,
+        aggregatedImageScores: orig.aggregatedImageScores,
+        conditionAdjustmentPercent: orig.conditionAdjustmentPercent,
+      };
+    });
+
+    const validatedMaoInputs = validateMaoInputs(maoInputs);
+    const userEstimatedRepairs = validatedMaoInputs.estimatedRepairs || 0;
+
+    // AI (Gemini) repair estimate: use SOP $/sqft from Gemini condition (light/medium/heavy/full gut) + roof + HVAC + 10% buffer
+    let aiEstimatedRepairs = null;
+    let aiRepairBreakdown = null;
+    let aiRepairCostPerSqft = null;
+    if (subjectAggregated) {
+      const sopResult = estimateRepairsSOPWithBreakdown(subjectProperty, subjectAggregated);
+      if (sopResult != null && sopResult.total > 0) {
+        aiEstimatedRepairs = sopResult.total;
+        aiRepairCostPerSqft = sopResult.costPerSf;
+        aiRepairBreakdown = sopResult.breakdown;
+        // Add extra when subject is worse than comps (room-type comparison)
+        if (selectedComps.length > 0) {
+          const avgConditionAdjustment = selectedComps
+            .filter((c) => c.conditionAdjustmentPercent != null)
+            .reduce((sum, c) => sum + (c.conditionAdjustmentPercent || 0), 0) / (selectedComps.filter((c) => c.conditionAdjustmentPercent != null).length || 1);
+          if (avgConditionAdjustment > 0) {
+            const compComparisonExtra = Math.round(arv * Math.min(avgConditionAdjustment, 0.15));
+            aiEstimatedRepairs = aiEstimatedRepairs + compComparisonExtra;
+          }
+        }
+      } else if (arv) {
+        // Fallback when no square footage: use condition % of ARV
+        aiEstimatedRepairs = estimateRepairsFromCondition(arv, subjectAggregated);
+        if (aiEstimatedRepairs != null && selectedComps.length > 0) {
+          const avgConditionAdjustment = selectedComps
+            .filter((c) => c.conditionAdjustmentPercent != null)
+            .reduce((sum, c) => sum + (c.conditionAdjustmentPercent || 0), 0) / (selectedComps.filter((c) => c.conditionAdjustmentPercent != null).length || 1);
+          if (avgConditionAdjustment > 0) {
+            aiEstimatedRepairs = aiEstimatedRepairs + Math.round(arv * Math.min(avgConditionAdjustment, 0.15));
+          }
+        }
       }
     }
-    const mao = calculateMAO(arv, validatedMaoInputs);
+
+    if (!userEstimatedRepairs && !aiEstimatedRepairs) {
+      const sopRehab = estimateRepairsSOP(subjectProperty, subjectAggregated);
+      if (sopRehab != null && sopRehab > 0) {
+        validatedMaoInputs.estimatedRepairs = sopRehab;
+      } else if (subjectAggregated && arv) {
+        validatedMaoInputs.estimatedRepairs = estimateRepairsFromCondition(arv, subjectAggregated) || Math.round(arv * 0.12);
+      } else if (arv) {
+        validatedMaoInputs.estimatedRepairs = Math.round(arv * 0.12);
+      }
+    } else {
+      validatedMaoInputs.estimatedRepairs = Math.max(
+        userEstimatedRepairs,
+        aiEstimatedRepairs != null ? aiEstimatedRepairs : 0
+      );
+    }
+
+    if (validatedMaoInputs.useSOP === undefined) {
+      validatedMaoInputs.useSOP = (validatedMaoInputs.maoRule === 'sop' || validatedMaoInputs.maoRule == null || validatedMaoInputs.maoRule === '');
+    }
+    let mao = calculateMAO(arv, validatedMaoInputs);
+
+    // SOP: MAO can never be the listed price — our offer must always be below asking. Cap MAO strictly below list.
+    const listedPrice = property.price ?? property.askingPrice ?? property.listPrice ?? 0;
+    if (listedPrice > 0 && mao && mao.mao >= listedPrice) {
+      const maxMAOBelowList = listedPrice - 1; // strictly below list (e.g. $524,999 when list is $525,000)
+      const cappedSuggested = Math.round(maxMAOBelowList * 0.95);
+      mao = {
+        ...mao,
+        mao: maxMAOBelowList,
+        suggestedOffer: Math.min(mao.suggestedOffer ?? maxMAOBelowList, cappedSuggested),
+        cappedByListedPrice: true,
+        breakdown: mao.breakdown ? { ...mao.breakdown, baseMAO: maxMAOBelowList } : mao.breakdown,
+      };
+    }
 
     // Get area type from subject property preparation
     // Use areaType from prepared property if available, otherwise determine from normalized data
@@ -276,6 +456,10 @@ export const analyzeSelectedComps = asyncHandler(async (req, res, next) => {
     analysis.topCompsUsed = selectedCompIds.map(id => id);
     analysis.mao = mao?.mao || null;
     analysis.estimatedRepairs = validatedMaoInputs.estimatedRepairs;
+    analysis.userEstimatedRepairs = userEstimatedRepairs;
+    analysis.aiEstimatedRepairs = aiEstimatedRepairs != null ? aiEstimatedRepairs : undefined;
+    analysis.aiRepairCostPerSqft = aiRepairCostPerSqft != null ? aiRepairCostPerSqft : undefined;
+    analysis.aiRepairBreakdown = aiRepairBreakdown || undefined;
     analysis.holdingCost = validatedMaoInputs.holdingCost;
     analysis.closingCost = validatedMaoInputs.closingCost;
     analysis.wholesaleFee = validatedMaoInputs.wholesaleFee;
@@ -346,6 +530,10 @@ export const analyzeSelectedComps = asyncHandler(async (req, res, next) => {
           conditionCategory: analysis.conditionCategory,
           repairExtent: analysis.conditionCategory === 'light-repairs' ? 'Light repairs' : analysis.conditionCategory === 'heavy-repairs' ? 'Heavy repairs' : 'Medium repairs',
           estimatedRepairs: analysis.estimatedRepairs,
+          userEstimatedRepairs: analysis.userEstimatedRepairs,
+          aiEstimatedRepairs: analysis.aiEstimatedRepairs,
+          aiRepairCostPerSqft: analysis.aiRepairCostPerSqft,
+          aiRepairBreakdown: analysis.aiRepairBreakdown,
           interiorScore: analysis.interiorScore,
           exteriorScore: analysis.exteriorScore,
           overallConditionScore: analysis.overallConditionScore,
@@ -353,8 +541,8 @@ export const analyzeSelectedComps = asyncHandler(async (req, res, next) => {
           damageRiskScore: analysis.damageRiskScore,
         },
         comps: {
-          total: selectedComps.length,
-          selected: selectedComps.map((comp) => ({
+          total: compsForResponse.length,
+          selected: compsForResponse.map((comp) => ({
             _id: comp._id,
             address: comp.address || comp.formattedAddress,
             beds: comp.beds,
@@ -370,8 +558,44 @@ export const analyzeSelectedComps = asyncHandler(async (req, res, next) => {
             conditionRating: comp.conditionRating || null,
             renovationIndicators: comp.renovationIndicators || [],
             damageFlags: comp.damageFlags || [],
+            conditionAdjustmentPercent: comp.conditionAdjustmentPercent != null ? comp.conditionAdjustmentPercent : undefined,
+            // Room-by-room comp-to-subject comparison (SOP: align room types, compare condition/renovation/damage)
+            roomTypeComparisons: (comp.roomTypeComparisons || []).map((r) => ({
+              roomType: r.roomType,
+              subjectCondition: r.subjectCondition,
+              compCondition: r.compCondition,
+              conditionDifference: r.conditionDifference,
+              adjustmentPercent: r.adjustmentPercent,
+              confidence: r.confidence,
+              renovationDifference: r.renovationDifference,
+              damageDifference: r.damageDifference,
+            })),
+            // Gemini image analysis for this comp (for display on analysis results)
+            imageAnalyses: (comp.imageAnalyses || []).map((a) => sanitizeImageAnalysisForResponse(a)),
+            aggregatedImageScores: comp.aggregatedImageScores ? {
+              conditionCategory: comp.aggregatedImageScores.conditionCategory,
+              interiorScore: comp.aggregatedImageScores.interiorScore,
+              exteriorScore: comp.aggregatedImageScores.exteriorScore,
+              overallConditionScore: comp.aggregatedImageScores.overallConditionScore,
+              renovationScore: comp.aggregatedImageScores.renovationScore,
+              damageRiskScore: comp.aggregatedImageScores.damageRiskScore,
+              imageConfidence: comp.aggregatedImageScores.imageConfidence,
+            } : undefined,
           })),
         },
+        // Gemini image analysis for subject property (for display on analysis results)
+        subjectImageAnalysis: (subjectProperty.imageAnalyses && subjectProperty.imageAnalyses.length > 0) ? {
+          imageAnalyses: subjectProperty.imageAnalyses.map((a) => sanitizeImageAnalysisForResponse(a)),
+          aggregated: subjectAggregated ? {
+            conditionCategory: subjectAggregated.conditionCategory,
+            interiorScore: subjectAggregated.interiorScore,
+            exteriorScore: subjectAggregated.exteriorScore,
+            overallConditionScore: subjectAggregated.overallConditionScore,
+            renovationScore: subjectAggregated.renovationScore,
+            damageRiskScore: subjectAggregated.damageRiskScore,
+            imageConfidence: subjectAggregated.imageConfidence,
+          } : undefined,
+        } : undefined,
         dealScore: {
           overall: dealScore.dealScore,
           spreadScore: dealScore.spreadScore,
@@ -387,6 +611,8 @@ export const analyzeSelectedComps = asyncHandler(async (req, res, next) => {
           subjectRepairExtent: analysis.conditionCategory === 'light-repairs' ? 'Light repairs' : analysis.conditionCategory === 'heavy-repairs' ? 'Heavy repairs' : 'Medium repairs',
           compsCompared: selectedComps.length,
           conditionAdjustmentsApplied: selectedComps.some((c) => c.conditionAdjustmentPercent !== undefined && c.conditionAdjustmentPercent !== 0),
+          // What comps have that subject may be missing (from room-type comparisons)
+          subjectVsCompSummary: buildSubjectVsCompSummary(subjectProperty, selectedComps),
         },
       },
     });
@@ -754,16 +980,19 @@ export const findComparables = asyncHandler(async (req, res, next) => {
     // Import comps engine functions
     const { prepareSubjectProperty, findComparableProperties, scoreComparables, prepareCompSearch } = await import('../services/compsEngineService.js');
 
-    // Prepare subject property (normalize address, get metadata)
+    // Prepare subject property (normalize address, get metadata). Use propertyData.images (e.g. user-uploaded) when provided.
+    if (propertyData?.images?.length > 0) {
+      property.images = propertyData.images;
+      await property.save().catch(() => {});
+    }
+    const subjectImagesForSearch = property.images || [];
     console.log(`🔍 Finding comparables for property: ${address}`);
     console.log(`📍 Available coordinates - propertyData: ${propertyData?.latitude}, ${propertyData?.longitude} | property: ${property.latitude}, ${property.longitude}`);
     
     // Prepare subject property (skip image analysis - will run after comp selection)
-    // Returns { property, normalized, areaType, propertyCategory, imageAnalyses, aggregatedImageScores }
-    const prepared = await prepareSubjectProperty(address, property.images || [], true); // skipImageAnalysis = true
-    let subjectProperty = prepared.property; // Extract the actual property object
+    const prepared = await prepareSubjectProperty(address, subjectImagesForSearch, true); // skipImageAnalysis = true
+    let subjectProperty = prepared.property;
     
-    // Image analysis will be skipped - no imageAnalyses at this stage
     console.log('⏭️ Skipping subject property image analysis (will run after comp selection)');
     
     // Priority order for coordinates:
@@ -926,25 +1155,77 @@ export const findComparables = asyncHandler(async (req, res, next) => {
     }
 
     // Find comparable properties (SOLD properties only)
-    // The findComparableProperties function automatically sets isSold: true
+    // SOP: Prefer 6 months sold; extend to 12 only when needed (low confidence). Initial search always uses 6 months.
+    const matchingCriteria = searchParams.matchingCriteria || {
+      propertyType: true,
+      bedrooms: { tolerance: 1 },
+      bathrooms: { tolerance: 1 },
+      squareFootage: { tolerance: 0.2, maxDiff: 300 },
+      lotSize: { tolerance: 0.5, oversizedThreshold: 20000 },
+      yearBuilt: { tolerance: 15 },
+      areaType: prepared.areaType,
+    };
+
     console.log(`🔍 Searching for SOLD comparables near: ${subjectProperty.latitude}, ${subjectProperty.longitude}`);
-    console.log(`📊 Search parameters: radius=${searchParams.radius}mi, timeWindow=${timeWindowMonths || searchParams.preferredMonths} months, propertyType=${subjectProperty.propertyType || 'any'}`);
+    console.log(`📊 Search parameters: radius=${searchParams.radius}mi, timeWindow=${searchParams.preferredMonths} months (SOP: prefer 6, extend to 12 if needed), propertyType=${subjectProperty.propertyType || 'any'}`);
     console.log(`📍 Subject property: ${subjectProperty.formattedAddress || subjectProperty.address}`);
     console.log(`🏠 Subject property details: ${subjectProperty.beds || '?'} beds, ${subjectProperty.baths || '?'} baths, ${subjectProperty.squareFootage || '?'} sqft`);
-    
-    const comps = await findComparableProperties(subjectProperty, {
+
+    let comps = await findComparableProperties(subjectProperty, {
       latitude: subjectProperty.latitude,
       longitude: subjectProperty.longitude,
       radius: searchParams.radius,
-      timeWindowMonths: parseInt(timeWindowMonths) || searchParams.preferredMonths,
+      timeWindowMonths: searchParams.preferredMonths, // SOP: prefer 6 months first; engine expands to 12 when needed
       maxMonths: searchParams.maxMonths,
       maxRadius: searchParams.maxRadius,
       preferredMonths: searchParams.preferredMonths,
       propertyType: subjectProperty.propertyType,
       maxResults: parseInt(maxResults) || 1000,
+      matchingCriteria,
     });
 
     console.log(`📊 Found ${comps.length} SOLD comparable properties after scraping`);
+
+    // Score the comps using the matching criteria from search params
+    let scoredComps = scoreComparables(subjectProperty, comps, matchingCriteria);
+    const maxScore = scoredComps.length ? Math.max(...scoredComps.map((c) => c.compScore || 0)) : 0;
+    const needMore = scoredComps.length < 3 || maxScore < 65;
+    const currentRadius = searchParams.radius ?? 0.5;
+
+    // If fewer than 3 comps or best score < 65, expand to 1.0 mi and up to 12 months (SOP: extend to 12 as last resort)
+    if (needMore && currentRadius < 1.0) {
+      console.log(`⚠️ Few comps (${scoredComps.length}) or low max score (${maxScore}); expanding to 1.0 mi and up to 12 months per SOP`);
+      const compsExpanded = await findComparableProperties(subjectProperty, {
+        latitude: subjectProperty.latitude,
+        longitude: subjectProperty.longitude,
+        radius: 1.0,
+        timeWindowMonths: searchParams.maxMonths, // SOP: extend to 12 months when needed
+        maxMonths: searchParams.maxMonths,
+        maxRadius: Math.max(searchParams.maxRadius || 1, 1),
+        preferredMonths: searchParams.preferredMonths,
+        propertyType: subjectProperty.propertyType,
+        maxResults: parseInt(maxResults) || 1000,
+        matchingCriteria,
+      });
+      if (compsExpanded.length > 0) {
+        const seen = new Set();
+        const mergeKey = (c) => (c.sourceId || c.formattedAddress || c.address || '').toString().trim().toLowerCase();
+        for (const c of comps) {
+          const key = mergeKey(c);
+          if (key) seen.add(key);
+        }
+        const beforeCount = comps.length;
+        for (const c of compsExpanded) {
+          const key = mergeKey(c);
+          if (key && !seen.has(key)) {
+            seen.add(key);
+            comps.push(c);
+          }
+        }
+        console.log(`📊 After 1.0 mi expansion: ${comps.length} total comparables (added ${comps.length - beforeCount} new)`);
+        scoredComps = scoreComparables(subjectProperty, comps, matchingCriteria);
+      }
+    }
 
     if (comps.length === 0) {
       console.warn(`⚠️ No SOLD comparables found. This could be due to:
@@ -960,24 +1241,11 @@ export const findComparables = asyncHandler(async (req, res, next) => {
         data: [],
         searchParams: {
           radius: searchParams.radius,
-          timeWindowMonths: timeWindowMonths || searchParams.preferredMonths,
+          timeWindowMonths: `${searchParams.preferredMonths} (SOP: extend to ${searchParams.maxMonths} if needed)`,
           propertyType: subjectProperty.propertyType,
         },
       });
     }
-
-    // Score the comps using the matching criteria from search params
-    const matchingCriteria = searchParams.matchingCriteria || {
-      propertyType: true,
-      bedrooms: { tolerance: 1 },
-      bathrooms: { tolerance: 1 },
-      squareFootage: { tolerance: 0.2 },
-      lotSize: { tolerance: 0.5 },
-      yearBuilt: { tolerance: 10 },
-      areaType: prepared.areaType,
-    };
-
-    const scoredComps = scoreComparables(subjectProperty, comps, matchingCriteria);
 
     // Sort by comp score and limit
     const sortedComps = scoredComps

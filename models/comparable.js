@@ -20,6 +20,7 @@ const comparableSchema = new mongoose.Schema(
     lotSize: Number,
     yearBuilt: Number,
     propertyType: String,
+    stories: Number, // SOP: 1-story vs 1-story, 2-story vs 2-story matching
     
     // Sale information
     saleDate: Date,
