@@ -13,10 +13,11 @@ const sendToken = async (res, next, user, statusCode = 200, message) => {
   res.cookie(getEnv('ACCESS_TOKEN_NAME'), accessToken, accessTokenOptions);
   res.cookie(getEnv('REFRESH_TOKEN_NAME'), refreshToken, refreshTokenOptions);
 
+  // Return accessToken in body so frontend can send Authorization header (works cross-origin in production)
   return res.status(statusCode).json({
     success: true,
     message,
-    data: { ...user._doc, password: null },
+    data: { ...user._doc, password: null, token: accessToken, accessToken },
   });
 };
 
