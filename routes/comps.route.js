@@ -22,6 +22,25 @@ router.post('/find/:propertyId', isAuthenticated, findComparables);
 // Analyze selected comps (3-5 comps) - NEW
 router.post('/analyze-selected', isAuthenticated, analyzeSelectedComps);
 
+// Analyze selected comps with Server-Sent Events progress (same body as analyze-selected)
+router.post('/analyze-selected-stream', isAuthenticated, (req, res, next) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+  req.progress = (ev) => {
+    res.write('data: ' + JSON.stringify(ev) + '\n\n');
+    if (typeof res.flush === 'function') res.flush();
+  };
+  const originalJson = res.json.bind(res);
+  res.json = (body) => {
+    res.write('data: ' + JSON.stringify({ type: 'complete', ...body }) + '\n\n');
+    res.end();
+  };
+  next();
+}, analyzeSelectedComps);
+
 // Analyze property by ID (from search results) - must come before /analyze route
 router.post('/analyze/:propertyId', isAuthenticated, analyzePropertyById);
 

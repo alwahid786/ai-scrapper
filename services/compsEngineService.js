@@ -1243,8 +1243,9 @@ export function getCompSalePrice(comp) {
  * SOP Step 5: Dollar adjustments to comp sale price to reflect subject property.
  * Bed/Bath ±$10K each (or $15K for 1↔2 bath), Garage ±$10K, ±$10K per 100 SF, ±$10K per 10k lot, Pool ±$10–25K.
  * Condition: Partially updated +$5K, Outdated +$15K (bring comp to "updated" baseline).
+ * Exported for use in find-comparables response (show adjusted ARV on comp cards).
  */
-function getSOPAdjustedCompPrice(subjectProperty, comp) {
+export function getSOPAdjustedCompPrice(subjectProperty, comp) {
   const salePrice = getCompSalePrice(comp);
   if (salePrice == null || salePrice <= 0) return null;
 

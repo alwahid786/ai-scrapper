@@ -171,23 +171,34 @@ export const analyzeSelectedComps = asyncHandler(async (req, res, next) => {
     await property.save().catch(() => {});
   }
 
+  const progress = req.progress || (() => {});
+
   try {
+    progress({ type: 'step', step: 'subject_prep', message: 'Preparing subject property...', address });
+
     // Import comps engine functions (getCompSalePrice used to patch salePrice from rawData when DB has none)
     const { prepareSubjectProperty, calculateARV, calculateMAO, calculateDealScore, generateRecommendation, estimateRepairsFromCondition, estimateRepairsSOP, estimateRepairsSOPWithBreakdown, getCompSalePrice } = await import('../services/compsEngineService.js');
     const { analyzePropertyImages, aggregateImageAnalyses } = await import('../services/geminiService.js');
 
     // Prepare subject property WITH image analysis (skipImageAnalysis = false); analyzes only subject images for comp-to-subject comparison
+    progress({ type: 'step', step: 'subject_images', message: 'Analyzing subject property images (AI)...', address });
     console.log(`📊 Running analysis on ${selectedComps.length} selected comps for property: ${address}`);
     console.log(`🖼️ Running image analysis for subject property (${propertyImages.length} images)...`);
     const prepared = await prepareSubjectProperty(address, propertyImages, false); // skipImageAnalysis = false
     const subjectProperty = prepared.property;
     const subjectAggregated = prepared.aggregatedImageScores;
+    progress({ type: 'step', step: 'subject_done', message: 'Subject property ready', address });
 
     // Run image analysis on selected comps (if they have images)
     console.log(`🖼️ Running image analysis on ${selectedComps.length} selected comps...`);
     const { alignRoomTypesForComparison } = await import('../services/compsEngineService.js');
-    
+    const totalComps = selectedComps.length;
+    let compIndex = 0;
+
     for (const comp of selectedComps) {
+      compIndex += 1;
+      const compAddress = comp.address || comp.formattedAddress || 'Comparable';
+      progress({ type: 'step', step: 'comp', message: `Analyzing comparable ${compIndex} of ${totalComps}...`, index: compIndex, total: totalComps, address: compAddress });
       if (comp.images && comp.images.length > 0) {
         try {
           console.log(`  🖼️ Analyzing ${comp.images.length} images for comp: ${comp.address || comp.formattedAddress}`);
@@ -285,7 +296,10 @@ export const analyzeSelectedComps = asyncHandler(async (req, res, next) => {
       console.log(`📐 Subject for ARV: ${subjectProperty.beds ?? '?'} bed, ${subjectProperty.baths ?? '?'} bath, ${subjectProperty.squareFootage ?? '?'} sqft`);
     }
 
+    progress({ type: 'step', step: 'repairs', message: 'Calculating repair estimates...', address });
+
     // Calculate ARV using only selected comps (SOP: adjusted prices, weighted average, ceiling max comp + $10K)
+    progress({ type: 'step', step: 'arv', message: 'Calculating After Repair Value (ARV)...', address });
     console.log(`💰 Calculating ARV from ${selectedComps.length} selected comps...`);
     const { arv, adjustedComps } = calculateARV(subjectProperty, selectedComps);
 
@@ -301,6 +315,7 @@ export const analyzeSelectedComps = asyncHandler(async (req, res, next) => {
       });
       return next(new CustomError(400, 'Could not calculate ARV from selected comps. Ensure comps have valid sale prices.'));
     }
+    progress({ type: 'step', step: 'arv_done', message: 'ARV calculated', arv });
 
     // Build response comp list from selectedComps (full DB + in-memory fields) and overlay adjustedPrice from adjustedComps.
     // This ensures address, saleDate, salePrice, distanceMiles, compScore, dataSource are always present (from DB or rawData).
@@ -400,6 +415,8 @@ export const analyzeSelectedComps = asyncHandler(async (req, res, next) => {
     if (validatedMaoInputs.useSOP === undefined) {
       validatedMaoInputs.useSOP = (validatedMaoInputs.maoRule === 'sop' || validatedMaoInputs.maoRule == null || validatedMaoInputs.maoRule === '');
     }
+    progress({ type: 'step', step: 'repairs_done', message: 'Repair estimates calculated', estimatedRepairs: validatedMaoInputs.estimatedRepairs });
+    progress({ type: 'step', step: 'mao', message: 'Calculating Max Allowable Offer (MAO)...', address });
     let mao = calculateMAO(arv, validatedMaoInputs);
 
     // SOP: MAO can never be the listed price — our offer must always be below asking. Cap MAO strictly below list.
@@ -433,8 +450,10 @@ export const analyzeSelectedComps = asyncHandler(async (req, res, next) => {
       daysOnMarket: property.daysOnMarket || 90,
       areaType: areaType, // Pass area type for neighborhood rating
     };
+    progress({ type: 'step', step: 'mao_done', message: 'MAO calculated', mao: mao?.mao });
 
     // Calculate Deal Score (now async to fetch neighborhood rating)
+    progress({ type: 'step', step: 'deal_score', message: 'Calculating deal score & recommendation...', address });
     const dealScore = await calculateDealScore(subjectProperty, tempAnalysis, selectedComps);
 
     // Generate recommendation
@@ -977,8 +996,8 @@ export const findComparables = asyncHandler(async (req, res, next) => {
   }
 
   try {
-    // Import comps engine functions
-    const { prepareSubjectProperty, findComparableProperties, scoreComparables, prepareCompSearch } = await import('../services/compsEngineService.js');
+    // Import comps engine functions (getSOPAdjustedCompPrice for adjusted ARV per comp per SOP Step 5)
+    const { prepareSubjectProperty, findComparableProperties, scoreComparables, prepareCompSearch, getSOPAdjustedCompPrice } = await import('../services/compsEngineService.js');
 
     // Prepare subject property (normalize address, get metadata). Use propertyData.images (e.g. user-uploaded) when provided.
     if (propertyData?.images?.length > 0) {
@@ -1304,25 +1323,29 @@ export const findComparables = asyncHandler(async (req, res, next) => {
       message: `Found ${savedComps.length} comparable properties`,
       count: savedComps.length,
       propertyId: dbPropertyId, // Return the database property ID for use in analyze-selected
-      data: savedComps.map((comp) => ({
-        _id: comp._id,
-        address: comp.address || comp.formattedAddress,
-        beds: comp.beds,
-        baths: comp.baths,
-        squareFootage: comp.squareFootage,
-        lotSize: comp.lotSize,
-        yearBuilt: comp.yearBuilt,
-        propertyType: comp.propertyType,
-        saleDate: comp.saleDate,
-        salePrice: comp.salePrice ?? resolveCompSalePrice(comp),
-        distanceMiles: comp.distanceMiles,
-        compScore: comp.compScore,
-        dataSource: comp.dataSource,
-        images: comp.images || [],
-        conditionRating: comp.conditionRating || null,
-        renovationIndicators: comp.renovationIndicators || [],
-        damageFlags: comp.damageFlags || [],
-      })),
+      data: savedComps.map((comp) => {
+        const adjustedPrice = getSOPAdjustedCompPrice(subjectProperty, comp);
+        return {
+          _id: comp._id,
+          address: comp.address || comp.formattedAddress,
+          beds: comp.beds,
+          baths: comp.baths,
+          squareFootage: comp.squareFootage,
+          lotSize: comp.lotSize,
+          yearBuilt: comp.yearBuilt,
+          propertyType: comp.propertyType,
+          saleDate: comp.saleDate,
+          salePrice: comp.salePrice ?? resolveCompSalePrice(comp),
+          adjustedPrice: adjustedPrice ?? undefined, // SOP Step 5: adjusted ARV for comp card display & weighted ARV
+          distanceMiles: comp.distanceMiles,
+          compScore: comp.compScore,
+          dataSource: comp.dataSource,
+          images: comp.images || [],
+          conditionRating: comp.conditionRating || null,
+          renovationIndicators: comp.renovationIndicators || [],
+          damageFlags: comp.damageFlags || [],
+        };
+      }),
     });
   } catch (error) {
     console.error('Find comparables error:', error);
