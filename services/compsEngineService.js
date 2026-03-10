@@ -6,7 +6,7 @@ import { normalizeAddress, calculateDistance, getDefaultRadius, determineAreaTyp
 import {
   scrapeZillowProperties,
   scrapeZillowSoldProperties,
-  // scrapeRedfinProperties,
+  scrapeRedfinProperties,
   // scrapeRealtorProperties,
   normalizePropertyData,
 } from './apifyService.js';
@@ -427,11 +427,11 @@ const isAcrossMajorRoad = (subjectProperty, comp) => {
 export const findComparableProperties = async (subjectProperty, searchParams, isExpansion = false) => {
   const { latitude, longitude, radius, timeWindowMonths, propertyType, maxRadius, preferredMonths, maxMonths } = searchParams;
   const comps = [];
-  // Zillow Sold actor first (dedicated sold comps), then Zillow URL scraper; other platforms commented out
+  // Zillow Sold first, then Redfin SOLD, then Zillow URL scraper (same SOP: distance, ZIP, filters)
   const sources = [
     { name: 'zillow-sold', scraper: scrapeZillowSoldProperties },
+    { name: 'redfin', scraper: scrapeRedfinProperties },
     { name: 'zillow', scraper: scrapeZillowProperties },
-    // { name: 'redfin', scraper: scrapeRedfinProperties },
     // { name: 'realtor', scraper: scrapeRealtorProperties },
     // { name: 'mls', scraper: scrapeMLSProperties },
     // { name: 'county', scraper: scrapeCountyProperties },
@@ -627,8 +627,8 @@ export const findComparableProperties = async (subjectProperty, searchParams, is
             continue;
           }
 
-          // Fetch full property details by URL only when comps did NOT come from Zillow Sold actor
-          // (Zillow Sold actor already returns full details: address, beds, baths, sqft, price, photos, etc.)
+          // Fetch full property details by URL when comps did NOT come from Zillow Sold actor
+          // (Zillow Sold already returns full details). For Redfin we fetch details via tri_angle/redfin-detail.
           const skipDetailFetch = source === 'zillow-sold';
           if (!skipDetailFetch) {
             let fullCompDetails = null;
@@ -638,15 +638,20 @@ export const findComparableProperties = async (subjectProperty, searchParams, is
             if (compPropertyUrl || compZpid) {
               try {
                 console.log(`  🔍 Fetching full details for comp: ${normalized.address}`);
-                const { fetchZillowPropertyDetailsByUrl } = await import('../services/apifyService.js');
+                const { fetchZillowPropertyDetailsByUrl, fetchRedfinPropertyDetailsByUrl } = await import('../services/apifyService.js');
 
                 let detailUrl = compPropertyUrl;
-                if (!detailUrl && compZpid) {
+                if (!detailUrl && compZpid && source !== 'redfin') {
                   detailUrl = `https://www.zillow.com/homedetails/${compZpid}_zpid/`;
                 }
 
                 if (detailUrl) {
-                  const detailResult = await fetchZillowPropertyDetailsByUrl(detailUrl);
+                  let detailResult = null;
+                  if (source === 'redfin') {
+                    detailResult = await fetchRedfinPropertyDetailsByUrl(detailUrl);
+                  } else {
+                    detailResult = await fetchZillowPropertyDetailsByUrl(detailUrl);
+                  }
 
                   if (detailResult && detailResult.property) {
                     fullCompDetails = detailResult.property;
@@ -662,6 +667,11 @@ export const findComparableProperties = async (subjectProperty, searchParams, is
                     if (!normalized.lotSize && fullCompDetails.lotSize) normalized.lotSize = fullCompDetails.lotSize;
                     if (!normalized.yearBuilt && fullCompDetails.yearBuilt) normalized.yearBuilt = fullCompDetails.yearBuilt;
                     if (!normalized.propertyType && fullCompDetails.propertyType) normalized.propertyType = fullCompDetails.propertyType;
+                    if (fullCompDetails.salePrice != null && (normalized.salePrice == null || normalized.price == null)) {
+                      normalized.salePrice = fullCompDetails.salePrice;
+                      normalized.price = fullCompDetails.salePrice;
+                    }
+                    if (fullCompDetails.saleDate && !normalized.saleDate) normalized.saleDate = fullCompDetails.saleDate;
 
                     console.log(`  ✅ Successfully fetched full details for comp: ${normalized.address}`);
                   } else {

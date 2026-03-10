@@ -917,344 +917,217 @@ export const scrapeZillowSoldProperties = async (searchParams) => {
 };
 
 /**
- * Scrape Redfin properties using Apify
+ * Scrape Redfin SOLD properties using Apify (epctex/redfin-scraper).
+ * Input: search (e.g. "City, State"), searchMode: "SOLD", maxItems, endPage, proxy.
+ * Output: array of items with addressInfo, priceInfo, sqftInfo, lastSaleData (normalized in normalizePropertyData).
  */
 export const scrapeRedfinProperties = async (searchParams) => {
   const {
     address,
-    city, // Direct city from propertyData
-    state, // Direct state from propertyData
-    postalCode, // Direct postalCode from propertyData
+    city,
+    state,
     latitude,
     longitude,
-    radiusMiles = 1,
-    propertyType,
-    minPrice,
-    maxPrice,
-    minBeds,
-    minBaths,
-    minSqft,
     soldWithinMonths = 6,
-    isSold = false,
+    maxResults = 500,
   } = searchParams;
 
   const REDFIN_ACTOR_ID = process.env.APIFY_REDFIN_ACTOR_ID || process.env.REDFIN_ACTOR_ID;
 
   if (!REDFIN_ACTOR_ID || REDFIN_ACTOR_ID === 'your-redfin-actor-id') {
-    console.warn('REDFIN_ACTOR_ID not configured');
+    console.warn('APIFY_REDFIN_ACTOR_ID not configured');
     return { success: false, data: [], message: 'Redfin actor not configured' };
   }
 
-  console.log('Using Redfin actor:', REDFIN_ACTOR_ID);
-  console.log(`🔍 Search type: ${isSold ? 'SOLD' : 'FOR SALE'}`);
-  console.warn('⚠️ Note: This Redfin actor may not respect location parameter and return default results');
-
-  if (!address && !latitude && !longitude) {
-    return { success: false, data: [], message: 'Address or coordinates required for Redfin search' };
-  }
-
-  // Build input for Redfin scraper
-  // Prefer city/state strings for location; this actor can default to Miami on invalid input.
-  let redfinLocation = '';
-  
-  // Use direct city/state from searchParams if available (from propertyData)
+  // Build search string: "City, State" for epctex/redfin-scraper
   let extractedCity = city;
   let extractedState = state;
-  let extractedZip = postalCode;
-  
-  if (extractedCity && extractedState) {
-    // Use direct city/state from propertyData
-    redfinLocation = `${extractedCity}, ${extractedState}`;
-    console.log(`📍 Using city, state from propertyData for Redfin: ${redfinLocation}`);
-  } else if (address) {
-    // Extract city and state from address if not provided directly
-    const addressParts = address.split(',').map(s => s.trim());
-    const cleanParts = addressParts.filter(p => p.toUpperCase() !== 'USA');
-    
-    // Find city and state
-    for (let i = 0; i < cleanParts.length; i++) {
-      const part = cleanParts[i].trim();
-      
-      // Check if this part is a state (2-letter code)
-      if (/^[A-Z]{2}$/i.test(part)) {
-        extractedState = part.toUpperCase();
-        if (i > 0) {
-          extractedCity = cleanParts[i - 1].trim();
+  if (!extractedCity || !extractedState) {
+    if (address) {
+      const addressParts = address.split(',').map((s) => s.trim()).filter(Boolean);
+      for (let i = 0; i < addressParts.length; i++) {
+        const part = addressParts[i];
+        if (/^[A-Z]{2}$/i.test(part)) {
+          extractedState = part.toUpperCase();
+          if (i > 0) extractedCity = addressParts[i - 1];
+          break;
         }
-        break;
       }
-      
-      // Check if this part contains "State Zip" format
-      const stateZipMatch = part.match(/^([A-Z]{2})\s+(\d{5})$/i);
-      if (stateZipMatch) {
-        extractedState = stateZipMatch[1].toUpperCase();
-        if (i > 0) {
-          extractedCity = cleanParts[i - 1].trim();
-        }
-        break;
-      }
-    }
-    
-    if (extractedCity && extractedState) {
-      redfinLocation = `${extractedCity}, ${extractedState}${extractedZip ? ` ${extractedZip}` : ''}`;
-      console.log(`📍 Using parsed city, state for Redfin: ${redfinLocation}`);
-    } else {
-      redfinLocation = address;
-      console.log(`📍 Using full address for Redfin: ${redfinLocation}`);
-    }
-  }
-  
-  // Only use coordinates as a last resort
-  if (!redfinLocation && latitude && longitude) {
-    redfinLocation = `${latitude},${longitude}`;
-    console.log(`📍 Using coordinates for Redfin (fallback): ${redfinLocation}`);
-  }
-
-  if (!redfinLocation) {
-    return { success: false, data: [], message: 'Address or coordinates required for Redfin search' };
-  }
-  
-  // Map propertyType to Redfin's expected values: "all", "house", "condo", "townhouse", "land", "multi_family"
-  let redfinPropertyType = null;
-  if (propertyType) {
-    const propertyTypeLower = propertyType.toLowerCase();
-    if (propertyTypeLower.includes('single') || propertyTypeLower.includes('family') || propertyTypeLower === 'house') {
-      redfinPropertyType = 'house';
-    } else if (propertyTypeLower.includes('condo')) {
-      redfinPropertyType = 'condo';
-    } else if (propertyTypeLower.includes('townhouse') || propertyTypeLower.includes('town-house')) {
-      redfinPropertyType = 'townhouse';
-    } else if (propertyTypeLower.includes('multi') || propertyTypeLower.includes('duplex')) {
-      redfinPropertyType = 'multi_family';
-    } else if (propertyTypeLower.includes('land') || propertyTypeLower.includes('vacant')) {
-      redfinPropertyType = 'land';
-    } else {
-      redfinPropertyType = 'all'; // Default to all if unknown
+      if (!extractedCity && addressParts.length > 0) extractedCity = addressParts[0];
     }
   }
 
+  const searchStr = extractedCity && extractedState
+    ? `${extractedCity}, ${extractedState}`
+    : (address || (latitude != null && longitude != null ? `${latitude},${longitude}` : ''));
+
+  if (!searchStr) {
+    return { success: false, data: [], message: 'Location (city/state or address) required for Redfin search' };
+  }
+
+  // epctex/redfin-scraper input format
   const input = {
-    location: redfinLocation,
-    maxResults: 200, // Increased to get more properties
-    // Add filters if provided - use mapped propertyType
-    ...(redfinPropertyType ? { propertyType: redfinPropertyType } : {}),
-    // IMPORTANT: Explicitly set isSold for sold property searches
-    ...(isSold ? { isSold: true } : {}),
-    // For sold properties, include soldWithinMonths
-    ...(isSold && soldWithinMonths ? { soldWithinMonths } : {}),
-    // Add radius if we have coordinates
-    ...(latitude && longitude && radiusMiles ? { radius: radiusMiles } : {}),
-    // Add price filters if provided
-    ...(minPrice ? { minPrice } : {}),
-    ...(maxPrice ? { maxPrice } : {}),
-    ...(minBeds ? { minBeds } : {}),
-    ...(minBaths ? { minBaths } : {}),
-    ...(minSqft ? { minSqft } : {}),
+    search: searchStr,
+    searchMode: 'SOLD',
+    maxItems: Math.min(Number(maxResults) || 500, 500),
+    endPage: 5,
+    proxy: { useApifyProxy: true },
+    includeAboveTheFold: false,
+    includeAmenities: false,
+    includeBannerData: false,
+    includeBelowTheFold: false,
+    includeFloorplans: false,
+    includeParcelBounds: false,
+    includeSellsideThreshold: false,
+    includeWalkScore: false,
   };
 
-  // Remove null/undefined values
-  Object.keys(input).forEach(key => {
-    if (input[key] === null || input[key] === undefined) {
-      delete input[key];
-    }
-  });
-
-  console.log('Redfin Apify input:', JSON.stringify(input, null, 2));
+  console.log('🔍 Redfin (epctex) actor input:', { search: input.search, searchMode: input.searchMode, maxItems: input.maxItems });
   const result = await runApifyActor(REDFIN_ACTOR_ID, input);
   console.log('Redfin Apify result:', { success: result.success, dataLength: result.data?.length || 0 });
-  
-  // Check if Redfin actor is returning wrong location (known issue with this actor)
-  const derived = extractCityState(redfinLocation);
-  const expectedCity = extractedCity ? extractedCity.toLowerCase() : (derived.city ? derived.city.toLowerCase() : '');
-  const expectedState = extractedState ? extractedState.toLowerCase() : (derived.state ? derived.state.toLowerCase() : '');
 
-  if (result.success && result.data && result.data.length > 0) {
-    const sampleProperty = result.data[0];
-    const sampleCity = (sampleProperty.city || '').toLowerCase();
-    const sampleState = (sampleProperty.state || '').toLowerCase();
-    
-    // If we have expected city/state and they don't match, the actor is broken
-    if (expectedCity && expectedState && sampleCity && sampleState) {
-      if (sampleCity !== expectedCity || sampleState !== expectedState) {
-        console.warn(`⚠️ Redfin actor returned properties from ${sampleCity}, ${sampleState} but we searched for ${expectedCity}, ${expectedState}`);
-        console.warn(`⚠️ This actor is known to ignore location parameters. Results may be inaccurate.`);
-        
-        // If the location is completely wrong (different state), skip Redfin entirely
-        if (sampleState !== expectedState) {
-          console.error(`❌ Redfin actor returned wrong state (${sampleState} vs ${expectedState}). Skipping Redfin results.`);
-          return { success: false, data: [], message: 'Redfin actor returned properties from wrong location', error: 'Actor location mismatch' };
-        }
-      }
-    }
-    
-    // Check if Redfin is returning sold properties when requested
-    if (isSold) {
-      const soldCount = result.data.filter(p => {
-        const listingType = (p.listing_type || p.listingType || '').toLowerCase();
-        const listingStatus = (p.listing_status || p.listingStatus || p.status || '').toLowerCase();
-        return listingType === 'sold' || listingType.includes('sold') || listingStatus === 'sold' || listingStatus.includes('sold');
-      }).length;
-      
-      if (soldCount === 0 && result.data.length > 0) {
-        console.warn(`⚠️ Redfin actor returned ${result.data.length} properties but NONE are marked as sold, even though isSold=true was set`);
-        console.warn(`⚠️ This actor may not support sold property searches. Sample listing_type: ${result.data[0]?.listing_type || 'unknown'}`);
-      }
-    }
+  if (!result.success) {
+    return result;
+  }
 
-    // Hard filter to requested city/state to avoid default Miami results
-    if (expectedCity && expectedState) {
-      const originalCount = result.data.length;
-      result.data = result.data.filter((property) => {
-        const propCity = (property.city || '').toLowerCase();
-        const propState = (property.state || '').toLowerCase();
-        const propAddress = (property.address || property.full_address || '').toLowerCase();
-
-        const cityMatch = propCity && (propCity === expectedCity || propCity.includes(expectedCity) || expectedCity.includes(propCity));
-        const stateMatch = propState && (propState === expectedState || propState.includes(expectedState) || expectedState.includes(propState));
-        const addressCityMatch = propAddress.includes(expectedCity);
-        const addressStateMatch = propAddress.includes(`, ${expectedState}`) || propAddress.includes(` ${expectedState}`);
-
-        return (cityMatch || addressCityMatch) && (stateMatch || addressStateMatch);
-      });
-
-      console.log(`✅ Redfin hard-filtered by city/state: ${originalCount} -> ${result.data.length}`);
-      if (result.data.length === 0) {
-        return {
-          success: false,
-          data: [],
-          message: 'Redfin actor returned properties from wrong location',
-          error: 'Actor location mismatch',
-        };
-      }
+  // Optional: filter by city/state when actor returns wrong area (epctex format: addressInfo.city, addressInfo.state)
+  if (result.data && result.data.length > 0 && extractedCity && extractedState) {
+    const expectedCity = extractedCity.toLowerCase();
+    const expectedState = extractedState.toLowerCase();
+    const before = result.data.length;
+    result.data = result.data.filter((item) => {
+      const addrInfo = item.addressInfo || {};
+      const propCity = (addrInfo.city || '').toLowerCase();
+      const propState = (addrInfo.state || '').toLowerCase();
+      return propCity === expectedCity && propState === expectedState;
+    });
+    if (result.data.length < before) {
+      console.log(`✅ Redfin filtered by city/state: ${before} -> ${result.data.length}`);
     }
   }
-  
-  // Filter results by location - use geocoding if needed
-  // Filter by distance if we have coordinates
-  if (result.success && result.data && result.data.length > 0) {
-    // Get search coordinates if not provided
-    let searchLat = latitude;
-    let searchLng = longitude;
-    
-    if (!searchLat || !searchLng) {
-      try {
-        const { normalizeAddress } = await import('./googleMapsService.js');
-        const geocoded = await normalizeAddress(address);
-        if (geocoded && geocoded.latitude && geocoded.longitude) {
-          searchLat = geocoded.latitude;
-          searchLng = geocoded.longitude;
-          console.log(`✅ Geocoded Redfin search location: ${searchLat}, ${searchLng}`);
-        }
-      } catch (geoError) {
-        console.warn('⚠️ Failed to geocode for distance filtering:', geoError.message);
-      }
-    }
-    
-    console.log('📊 Redfin returned', result.data.length, 'properties before filtering');
-    
-    // STRICT FILTER: Only keep properties within search radius OR matching city/state
-    if (searchLat && searchLng) {
-      const originalCount = result.data.length;
-      result.data = result.data.filter((property) => {
-        const propLat = property.latitude || property.lat;
-        const propLng = property.longitude || property.lng || property.lon;
-        
-        // If property has coordinates, filter by distance (most accurate)
-        if (propLat && propLng) {
-          const distance = calculateDistance(searchLat, searchLng, propLat, propLng);
-          const withinRadius = distance <= radiusMiles;
-          
-          if (!withinRadius) {
-            console.log(`❌ Filtered out by distance: ${property.address || property.full_address || 'unknown'} (${distance.toFixed(2)}mi away)`);
-          }
-          
-          return withinRadius;
-        }
-        
-        // If no coordinates, fall back to city/state matching
-        console.log(`⚠️ Property missing coordinates, using city/state filter: ${property.address || property.full_address || 'unknown'}`);
-        
-        // Extract city and state from redfinLocation or use provided city/state
-        let searchCity, searchState;
-        if (city && state) {
-          searchCity = city.toLowerCase();
-          searchState = state.toLowerCase();
-        } else {
-        const locationParts = redfinLocation.split(',').map(s => s.trim());
-          searchCity = locationParts[0]?.toLowerCase();
-          searchState = locationParts[1]?.toLowerCase();
-        }
-        
-        if (searchCity && searchState) {
-          const propCity = (property.city || '').toLowerCase();
-          const propState = (property.state || '').toLowerCase();
-          const propAddress = (property.address || property.full_address || '').toLowerCase();
-          
-          const cityMatch = propCity && (propCity === searchCity || propCity.includes(searchCity) || searchCity.includes(propCity));
-          const stateMatch = propState && (propState === searchState || propState.includes(searchState) || searchState.includes(propState));
-          
-          // Also check address string
-          const addressCityMatch = propAddress && propAddress.includes(searchCity);
-          const addressStateMatch = propAddress && (propAddress.includes(`, ${searchState}`) || propAddress.includes(` ${searchState}`));
-          
-          const matches = (cityMatch || addressCityMatch) && (stateMatch || addressStateMatch);
-          
-          if (!matches) {
-            console.log(`❌ Filtered out by city/state: ${property.address || property.full_address || 'unknown'} (city: ${propCity || 'none'}, state: ${propState || 'none'})`);
-          }
-          
-          return matches;
-        }
-        
-        // If we can't filter, exclude it
-        return false;
-      });
-      
-      console.log(`✅ Filtered Redfin: ${originalCount} -> ${result.data.length} (within ${radiusMiles}mi OR matching city/state)`);
-    } else {
-      // If no coordinates, filter by city/state STRICTLY
-      console.warn('⚠️ No search coordinates - using city/state filtering (less accurate)');
-      
-      // Extract city and state from redfinLocation or use provided city/state
-      let searchCity, searchState;
-      if (city && state) {
-        searchCity = city.toLowerCase();
-        searchState = state.toLowerCase();
-      } else {
-      const locationParts = redfinLocation.split(',').map(s => s.trim());
-        searchCity = locationParts[0]?.toLowerCase();
-        searchState = locationParts[1]?.toLowerCase();
-      }
-      
-      if (searchCity && searchState) {
-        const originalCount = result.data.length;
-        result.data = result.data.filter((property) => {
-          const propCity = (property.city || '').toLowerCase();
-          const propState = (property.state || '').toLowerCase();
-          const propAddress = (property.address || property.full_address || '').toLowerCase();
-          
-          const cityMatch = propCity && (propCity === searchCity || propCity.includes(searchCity) || searchCity.includes(propCity));
-          const stateMatch = propState && (propState === searchState || propState.includes(searchState) || searchState.includes(propState));
-          
-          // Also check address string
-          const addressCityMatch = propAddress && propAddress.includes(searchCity);
-          const addressStateMatch = propAddress && (propAddress.includes(`, ${searchState}`) || propAddress.includes(` ${searchState}`));
-          
-          const matches = (cityMatch || addressCityMatch) && (stateMatch || addressStateMatch);
-          
-          if (!matches) {
-            console.log(`❌ Filtered out: ${property.address || property.full_address || 'unknown'} (city: ${propCity || 'none'}, state: ${propState || 'none'})`);
-          }
-          
-          return matches;
-        });
-        
-        console.log(`✅ Filtered Redfin by city/state: ${originalCount} -> ${result.data.length}`);
-      }
-    }
-  }
-  
+
   return result;
+};
+
+/**
+ * Normalize one item from tri_angle/redfin-detail actor output for comp card (images + details).
+ * Input: single element from actor result array (addressSectionInfo, mediaBrowserInfo.photos, etc.)
+ */
+const normalizeRedfinDetailResponse = (detailItem) => {
+  if (!detailItem || typeof detailItem !== 'object') return null;
+  const addr = detailItem.addressSectionInfo || {};
+  const media = detailItem.mediaBrowserInfo || {};
+  const photos = media.photos;
+
+  const images = [];
+  if (Array.isArray(photos)) {
+    for (const p of photos) {
+      const url =
+        p.photoUrls?.fullScreenPhotoUrl ||
+        p.photoUrls?.nonFullScreenPhotoUrl ||
+        p.thumbnailData?.thumbnailUrl;
+      if (url && typeof url === 'string') images.push(url.trim());
+    }
+  }
+  if (images.length === 0 && addr.primaryPhotoUrl) {
+    images.push(addr.primaryPhotoUrl);
+  }
+
+  const sqftVal = addr.sqFt;
+  const squareFootage =
+    sqftVal != null
+      ? typeof sqftVal === 'object' && sqftVal.value != null
+        ? parseInt(String(sqftVal.value), 10)
+        : parseInt(String(sqftVal), 10)
+      : null;
+
+  const priceInfo = addr.priceInfo || addr.latestPriceInfo || {};
+  const amount = priceInfo.amount ?? priceInfo.value;
+  const salePrice = amount != null ? parseFloat(String(amount)) : null;
+
+  let saleDate = null;
+  if (addr.soldDate != null) {
+    const d = new Date(addr.soldDate);
+    if (!isNaN(d.getTime())) saleDate = d;
+  }
+
+  const lotSize =
+    addr.lotSize != null ? parseInt(String(addr.lotSize), 10) : null;
+  const yearBuilt =
+    addr.yearBuilt != null ? parseInt(String(addr.yearBuilt), 10) : null;
+
+  return {
+    images,
+    beds: addr.beds != null ? parseInt(addr.beds, 10) : null,
+    baths: addr.baths != null ? parseFloat(addr.baths) : null,
+    squareFootage,
+    lotSize,
+    yearBuilt,
+    salePrice,
+    saleDate,
+    propertyType: addr.propertyTypeName || null,
+    rawData: detailItem,
+  };
+};
+
+/**
+ * Fetch full property details from Redfin using property URL (tri_angle/redfin-detail actor).
+ * Returns { images: string[], property: normalized } for use in comp cards, same shape as Zillow detail.
+ */
+export const fetchRedfinPropertyDetailsByUrl = async (propertyUrl) => {
+  const REDFIN_DETAIL_ACTOR_ID =
+    process.env.APIFY_REDFIN_DETAIL_ACTOR_ID || 'tri_angle/redfin-detail';
+
+  if (!propertyUrl) {
+    console.warn('No Redfin property URL provided for detail fetch');
+    return null;
+  }
+
+  const urlStr = String(propertyUrl).trim();
+  if (!urlStr.startsWith('http://') && !urlStr.startsWith('https://')) {
+    console.warn(`Invalid Redfin property URL: ${propertyUrl}`);
+    return null;
+  }
+
+  try {
+    console.log(`🔍 Fetching Redfin property details from URL: ${urlStr}`);
+    console.log(`📋 Using actor: ${REDFIN_DETAIL_ACTOR_ID}`);
+
+    const input = {
+      detailUrls: [{ url: urlStr }],
+      useResidentialProxies: true,
+      searchResultsDatasetId: '',
+    };
+
+    const result = await runApifyActor(REDFIN_DETAIL_ACTOR_ID, input);
+
+    if (!result.success) {
+      console.error(`❌ Redfin detail actor failed: ${result.error || result.message}`);
+      return null;
+    }
+
+    const data = result.data;
+    if (!Array.isArray(data) || data.length === 0) {
+      console.warn(`⚠️ Redfin detail actor returned no data for: ${urlStr}`);
+      return null;
+    }
+
+    const first = data[0];
+    const normalized = normalizeRedfinDetailResponse(first);
+    if (!normalized) {
+      console.warn(`⚠️ Could not normalize Redfin detail for: ${urlStr}`);
+      return null;
+    }
+
+    console.log(`✅ Redfin detail: ${normalized.images.length} images, beds=${normalized.beds}, baths=${normalized.baths}`);
+    return {
+      images: normalized.images,
+      property: normalized,
+    };
+  } catch (error) {
+    console.error('❌ Redfin detail fetch error:', error.message);
+    return null;
+  }
 };
 
 /**
@@ -1593,6 +1466,81 @@ const normalizeNewActorFormat = (rawData) => {
 };
 
 /**
+ * Normalize epctex/redfin-scraper output into common property format.
+ * Input shape: addressInfo, priceInfo, sqftInfo, lastSaleData, beds, fullBaths, propertyId, url, etc.
+ */
+const normalizeRedfinPropertyData = (rawData) => {
+  if (!rawData || typeof rawData !== 'object') return null;
+  const addr = rawData.addressInfo || {};
+  const centroid = addr.centroid?.centroid || addr.centroid || {};
+  const street = (addr.formattedStreetLine || '').trim();
+  const city = (addr.city || '').trim();
+  const state = (addr.state || '').trim();
+  const zip = (addr.zip || addr.postalCode || '').trim();
+  const addressParts = [street, city, state, zip].filter(Boolean);
+  const formattedAddress = addressParts.join(', ') || (rawData.url ? 'Redfin property' : '');
+
+  const priceInfo = rawData.priceInfo || {};
+  const amount = priceInfo.amount ?? priceInfo.homePrice?.int64Value ?? priceInfo.homePrice?.value;
+  const salePrice = amount != null ? parseFloat(String(amount)) : null;
+
+  const sqftInfo = rawData.sqftInfo || {};
+  const squareFootage = sqftInfo.amount != null ? parseInt(String(sqftInfo.amount), 10) : null;
+
+  const lotSizeObj = rawData.lotSize || {};
+  const lotSize = lotSizeObj.amount != null ? parseInt(String(lotSizeObj.amount), 10) : null;
+
+  const yearBuiltObj = rawData.yearBuilt || {};
+  const yearBuilt = yearBuiltObj.yearBuilt != null ? parseInt(String(yearBuiltObj.yearBuilt), 10) : null;
+
+  let saleDate = null;
+  const lastSale = rawData.lastSaleData || {};
+  if (lastSale.lastSoldDate) {
+    const d = new Date(lastSale.lastSoldDate);
+    if (!isNaN(d.getTime())) saleDate = d;
+  }
+
+  const lat = centroid.latitude != null ? parseFloat(centroid.latitude) : null;
+  const lng = centroid.longitude != null ? parseFloat(centroid.longitude) : null;
+
+  let propertyType = (rawData.propertyType || '').toString();
+  if (propertyType === 'SINGLE_FAMILY_RESIDENTIAL') propertyType = 'single family';
+  else if (propertyType === 'CONDO') propertyType = 'condo';
+  else if (propertyType === 'TOWNHOUSE') propertyType = 'townhouse';
+  else if (propertyType === 'MULTI_FAMILY') propertyType = 'multi family';
+
+  const beds = rawData.beds != null ? parseInt(rawData.beds, 10) : null;
+  const baths = rawData.fullBaths != null ? parseFloat(rawData.fullBaths) : (rawData.bathInfo?.computedTotalBaths != null ? parseFloat(rawData.bathInfo.computedTotalBaths) : null);
+
+  return {
+    dataSource: 'redfin',
+    sourceId: rawData.propertyId ? String(rawData.propertyId) : null,
+    address: formattedAddress,
+    formattedAddress,
+    latitude: lat,
+    longitude: lng,
+    beds,
+    baths,
+    squareFootage,
+    lotSize,
+    yearBuilt,
+    propertyType: propertyType || null,
+    price: salePrice,
+    salePrice,
+    saleDate,
+    listingStatus: 'sold',
+    propertyUrl: rawData.url || null,
+    url: rawData.url || null,
+    postalCode: zip || null,
+    zipCode: zip || null,
+    city: city || null,
+    state: state || null,
+    images: [],
+    rawData,
+  };
+};
+
+/**
  * Normalize property data from different sources into a common format
  */
 export const normalizePropertyData = (rawData, source) => {
@@ -1600,6 +1548,11 @@ export const normalizePropertyData = (rawData, source) => {
   if (!rawData || typeof rawData !== 'object') {
     console.warn(`Invalid rawData from ${source}:`, rawData);
     return null;
+  }
+
+  // Redfin (epctex/redfin-scraper) format: addressInfo, priceInfo, sqftInfo, lastSaleData
+  if (source === 'redfin' && (rawData.addressInfo || rawData.priceInfo)) {
+    return normalizeRedfinPropertyData(rawData);
   }
 
   // Some actors (e.g. Zillow Sold) return items wrapped as { property: {...} } or { data: {...} }; unwrap so we read price/address etc.
